@@ -1,0 +1,32 @@
+#######################################
+# Syntax Coloring Map For P10_32x16_QuarterScan
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+P10_32x16_QuarterScan	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+drawPixel	KEYWORD2
+drawLine	KEYWORD2
+fillRect	KEYWORD2
+drawRect	KEYWORD2
+fillScreen	KEYWORD2
+clearScreen	KEYWORD2
+color565	KEYWORD2
+setCursor	KEYWORD2
+setTextColor	KEYWORD2
+setTextSize	KEYWORD2
+print	KEYWORD2
+setBrightness	KEYWORD2
+width	KEYWORD2
+height	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
