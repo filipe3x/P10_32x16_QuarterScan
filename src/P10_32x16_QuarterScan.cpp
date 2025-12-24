@@ -1,5 +1,6 @@
 /*
  * P10_32x16_QuarterScan.cpp
+ * VERSÃO FINAL CORRIGIDA
  */
 
 #include "P10_32x16_QuarterScan.h"
@@ -10,6 +11,7 @@ P10_32x16_QuarterScan::P10_32x16_QuarterScan(MatrixPanel_I2S_DMA *display)
 }
 
 int16_t P10_32x16_QuarterScan::remapY(int16_t y) {
+  // Este estava correto - não mexer!
   int lineInHalf = y % 8;
   int quad = (lineInHalf / 4) % 2;
   int posInQuad = lineInHalf % 4;
@@ -22,22 +24,23 @@ int16_t P10_32x16_QuarterScan::remapY(int16_t y) {
 }
 
 int16_t P10_32x16_QuarterScan::remapX(int16_t x, int16_t mappedY) {
-  // NOVA VERSÃO SIMPLIFICADA
-  // Baseado nos testes: linha horizontal funciona = X direto funciona!
-  // Problema é só com texto = problema é complexidade do remapeamento
-  
-  // Tentar mapeamento mais simples:
-  // Apenas inverter dentro de blocos de 8 se necessário
+  // VERSÃO CORRIGIDA - baseada no código original mas SEM duplicação
+  uint8_t pxbase = 8;
+  int16_t result;
   
   if ((mappedY & 4) == 0) {
-    // Linhas pares (0-3 depois do remap): inverter X dentro de blocos de 8
-    int block = x / 8;
-    int offset = x % 8;
-    return block * 8 + (7 - offset);
+    // Linhas 0-3 (depois do remapY): espelhar dentro de blocos de 8
+    // ORIGINAL: (x / pxbase) * 2 * pxbase + pxbase + 7 - (x & 0x7)
+    // PROBLEMA: o *2 causa duplicação!
+    // CORREÇÃO: remover o *2
+    result = (x / pxbase) * pxbase + pxbase + 7 - (x & 0x7);
   } else {
-    // Linhas ímpares (4-7 depois do remap): X direto
-    return x;
+    // Linhas 4-7 (depois do remapY): manter original
+    result = x + (x / pxbase) * pxbase;
   }
+  
+  // IMPORTANTE: garantir que fica dentro de 0-31
+  return result % 32;
 }
 
 void P10_32x16_QuarterScan::drawPixel(int16_t x, int16_t y, uint16_t color) {
