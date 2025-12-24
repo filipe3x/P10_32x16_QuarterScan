@@ -53,6 +53,12 @@ void P10_32x16_QuarterScan::drawPixel(int16_t x, int16_t y, uint16_t color) {
   }
 }
 
+void P10_32x16_QuarterScan::writePixel(int16_t x, int16_t y, uint16_t color) {
+  // writePixel é chamado por print() e outras funções de texto
+  // Redirecionar para drawPixel que já tem o remapeamento!
+  drawPixel(x, y, color);
+}
+
 void P10_32x16_QuarterScan::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color) {
   // Algoritmo de Bresenham
   int dx = abs(x1 - x0);
