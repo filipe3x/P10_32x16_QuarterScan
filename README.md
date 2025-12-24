@@ -165,7 +165,7 @@ MIT License - Livre para uso comercial e pessoal
 
 ## 👨‍💻 Autor
 
-Desenvolvido por [Seu Nome] em Dezembro 2024
+Desenvolvido por Filipe Marques em Dezembro 2025
 
 ## 🙏 Créditos
 
