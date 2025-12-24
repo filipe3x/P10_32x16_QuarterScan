@@ -2,11 +2,14 @@
  * P10_32x16_QuarterScan.cpp
  * 
  * Implementação do driver para painéis P10 32x16 1/4 scan
+ * COM herança de Adafruit_GFX para texto funcionar!
  */
 
 #include "P10_32x16_QuarterScan.h"
 
-P10_32x16_QuarterScan::P10_32x16_QuarterScan(MatrixPanel_I2S_DMA *display) {
+// Construtor - IMPORTANTE: Inicializar Adafruit_GFX com dimensões!
+P10_32x16_QuarterScan::P10_32x16_QuarterScan(MatrixPanel_I2S_DMA *display) 
+  : Adafruit_GFX(32, 16) {  // ← Dizer à Adafruit_GFX que somos 32x16
   baseDisplay = display;
 }
 
@@ -38,12 +41,17 @@ int16_t P10_32x16_QuarterScan::remapX(int16_t x, int16_t mappedY) {
   }
 }
 
+// ESTA é a função CRÍTICA que Adafruit_GFX chama para TUDO!
+// Texto, linhas, retângulos, TUDO passa por aqui!
 void P10_32x16_QuarterScan::drawPixel(int16_t x, int16_t y, uint16_t color) {
+  // Validar limites
   if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
   
+  // Aplicar remapeamento
   int16_t mappedY = remapY(y);
   int16_t mappedX = remapX(x, mappedY);
   
+  // Desenhar no display base
   if (y < 8) {
     // Linhas 0-7: usar R1/G1/B1 (metade superior)
     baseDisplay->drawPixel(mappedX, mappedY, color);
@@ -53,51 +61,10 @@ void P10_32x16_QuarterScan::drawPixel(int16_t x, int16_t y, uint16_t color) {
   }
 }
 
-void P10_32x16_QuarterScan::writePixel(int16_t x, int16_t y, uint16_t color) {
-  // writePixel é chamado por print() e outras funções de texto
-  // Redirecionar para drawPixel que já tem o remapeamento!
-  drawPixel(x, y, color);
-}
-
-void P10_32x16_QuarterScan::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color) {
-  // Algoritmo de Bresenham
-  int dx = abs(x1 - x0);
-  int dy = abs(y1 - y0);
-  int sx = (x0 < x1) ? 1 : -1;
-  int sy = (y0 < y1) ? 1 : -1;
-  int err = dx - dy;
-  
-  while(true) {
-    drawPixel(x0, y0, color);
-    if (x0 == x1 && y0 == y1) break;
-    
-    int e2 = 2 * err;
-    if (e2 > -dy) { err -= dy; x0 += sx; }
-    if (e2 < dx) { err += dx; y0 += sy; }
-  }
-}
-
-void P10_32x16_QuarterScan::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
-  for(int16_t j = 0; j < h; j++) {
-    for(int16_t i = 0; i < w; i++) {
-      drawPixel(x + i, y + j, color);
-    }
-  }
-}
-
-void P10_32x16_QuarterScan::drawRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
-  drawLine(x, y, x + w - 1, y, color);           // Topo
-  drawLine(x + w - 1, y, x + w - 1, y + h - 1, color); // Direita
-  drawLine(x + w - 1, y + h - 1, x, y + h - 1, color); // Fundo
-  drawLine(x, y + h - 1, x, y, color);           // Esquerda
-}
-
 void P10_32x16_QuarterScan::fillScreen(uint16_t color) {
-  for(int y = 0; y < 16; y++) {
-    for(int x = 0; x < 32; x++) {
-      drawPixel(x, y, color);
-    }
-  }
+  // Usar função otimizada da classe base Adafruit_GFX
+  // que chama drawPixel() para cada pixel
+  Adafruit_GFX::fillScreen(color);
 }
 
 void P10_32x16_QuarterScan::clearScreen() {
@@ -106,22 +73,6 @@ void P10_32x16_QuarterScan::clearScreen() {
 
 uint16_t P10_32x16_QuarterScan::color565(uint8_t r, uint8_t g, uint8_t b) {
   return baseDisplay->color565(r, g, b);
-}
-
-void P10_32x16_QuarterScan::setCursor(int16_t x, int16_t y) {
-  baseDisplay->setCursor(x, y);
-}
-
-void P10_32x16_QuarterScan::setTextColor(uint16_t c) {
-  baseDisplay->setTextColor(c);
-}
-
-void P10_32x16_QuarterScan::setTextSize(uint8_t s) {
-  baseDisplay->setTextSize(s);
-}
-
-void P10_32x16_QuarterScan::print(const char* text) {
-  baseDisplay->print(text);
 }
 
 void P10_32x16_QuarterScan::setBrightness(uint8_t brightness) {
