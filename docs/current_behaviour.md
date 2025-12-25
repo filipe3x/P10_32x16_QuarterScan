@@ -631,3 +631,319 @@ This is NOT a software bug - it's how 1/4 scan panels work. Each "unique" pixel 
 2. **Different row mapping**: Put X 0-15 and X 16-31 on different physical rows
 3. **Hardware configuration**: Check if panel has jumpers/settings for column splitting
 4. **Alternative library config**: Try `mxconfig` with different panel chain settings
+
+---
+
+## 🎯 Vetores de Ataque - Estratégias para Resolver Duplicação
+
+Baseado em análise cruzada entre os dados recolhidos do painel e as discussões da comunidade:
+- [Issue #677](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/issues/677)
+- [Discussion #622](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/discussions/622)
+
+### Vetor 1: Configuração Alternativa do mxconfig (ALTA PRIORIDADE)
+
+A discussão #677 sugere que painéis 1/4 scan devem ser configurados com dimensões "virtuais" diferentes:
+
+```cpp
+// CONFIGURAÇÃO ATUAL (problemática)
+HUB75_I2S_CFG mxconfig(32, 16, 1, _pins);
+
+// CONFIGURAÇÃO ALTERNATIVA #1 - Dobrar largura, dividir altura
+HUB75_I2S_CFG mxconfig(
+    PANEL_RES_X * 2,    // 64 (não 32!)
+    PANEL_RES_Y / 2,    // 8 (não 16!)
+    NUM_PANELS,
+    _pins
+);
+
+// CONFIGURAÇÃO ALTERNATIVA #2 - Chain de painéis virtuais
+HUB75_I2S_CFG mxconfig(
+    16,    // largura de cada "sub-painel"
+    8,     // altura de cada "sub-painel"
+    4,     // 4 painéis em chain (simula 32x16)
+    _pins
+);
+
+// CONFIGURAÇÃO ALTERNATIVA #3 - Apenas metade da altura
+HUB75_I2S_CFG mxconfig(32, 8, 1, _pins);
+```
+
+**Justificação**: O driver assume que o painel tem uma certa arquitetura de shift registers. Alterar as dimensões "mente" ao driver sobre o layout físico, potencialmente alinhando com a realidade do hardware.
+
+**Teste rápido**:
+```cpp
+// Em DiagnosticTest.ino, linha 867, alterar para:
+HUB75_I2S_CFG mxconfig(64, 8, 1, _pins);
+```
+
+### Vetor 2: Algoritmo pxbase=16 da Issue #677
+
+A issue #677 apresenta um algoritmo diferente que usa `pxbase = 16`:
+
+```cpp
+uint8_t pxbase = 16;  // Nota: não 8!
+
+if ((coords.y & 4) == 0) {
+    coords.x += ((coords.x / pxbase) + 1) * pxbase;
+} else {
+    coords.x += (coords.x / pxbase) * pxbase;
+}
+coords.y = (coords.y >> 3) * 4 + (coords.y & 0b00000011);
+```
+
+**Diferenças chave vs implementação atual**:
+| Aspeto | Atual (pxbase=8) | Issue #677 (pxbase=16) |
+|--------|------------------|------------------------|
+| Tamanho do bloco | 8 pixels | 16 pixels |
+| Fórmula Y | `(lineInHalf/4)%2` swap | `(y>>3)*4 + (y&3)` |
+| Fórmula X (y&4==0) | `(x/8)*8 + 8 + 7 - (x&7)` | `x + ((x/16)+1)*16` |
+
+**Teste**:
+```cpp
+int16_t remapX_v677(int16_t x, int16_t mappedY) {
+    uint8_t pxbase = 16;
+    int16_t result;
+
+    if ((mappedY & 4) == 0) {
+        result = x + ((x / pxbase) + 1) * pxbase;
+    } else {
+        result = x + (x / pxbase) * pxbase;
+    }
+
+    return result;  // Sem % 32 - pode ir além de 31!
+}
+```
+
+### Vetor 3: Classe VirtualMatrixPanel Customizada
+
+Em vez de wrapper com Adafruit_GFX, usar a classe `VirtualMatrixPanel` da biblioteca base:
+
+```cpp
+#include <ESP32-VirtualMatrixPanel-I2S-DMA.h>
+
+class P10_QuarterScan_Virtual : public VirtualMatrixPanel {
+public:
+    P10_QuarterScan_Virtual(
+        MatrixPanel_I2S_DMA &display,
+        int panelsX, int panelsY,
+        int virtualWidth, int virtualHeight
+    ) : VirtualMatrixPanel(display, panelsX, panelsY, virtualWidth, virtualHeight) {}
+
+protected:
+    VirtualCoords getCoords(int16_t x, int16_t y) override {
+        VirtualCoords coords;
+        coords.x = x;
+        coords.y = y;
+
+        uint8_t pxbase = 8;  // ou 16
+
+        if ((coords.y & 4) == 0) {
+            coords.x = (coords.x / pxbase) * 2 * pxbase + pxbase + 7 - (coords.x & 0x7);
+        } else {
+            coords.x += (coords.x / pxbase) * pxbase;
+        }
+
+        coords.y = (coords.y >> 3) * 4 + (coords.y & 0b00000011);
+
+        return coords;
+    }
+};
+```
+
+**Vantagens**:
+- Integra nativamente com a biblioteca base
+- Suporta chains de painéis
+- Não precisa de wrapper separado
+
+**Uso**:
+```cpp
+MatrixPanel_I2S_DMA *dma_display = new MatrixPanel_I2S_DMA(mxconfig);
+P10_QuarterScan_Virtual *virtualDisplay = new P10_QuarterScan_Virtual(
+    *dma_display, 1, 1, 32, 16
+);
+// Usar virtualDisplay->drawPixel() etc.
+```
+
+### Vetor 4: Alteração do Pinout / Clock Phase
+
+Diferentes chips drivers (SM16208SJ, FM6124D, ICN2037BP) podem requerer configurações diferentes:
+
+```cpp
+// Testar diferentes valores de clkphase
+mxconfig.clkphase = false;  // Atual
+mxconfig.clkphase = true;   // Alternativa
+
+// Testar diferentes drivers
+mxconfig.driver = HUB75_I2S_CFG::SHIFTREG;    // Atual
+mxconfig.driver = HUB75_I2S_CFG::FM6124;      // Alternativa 1
+mxconfig.driver = HUB75_I2S_CFG::ICN2038S;    // Alternativa 2
+mxconfig.driver = HUB75_I2S_CFG::MBI5124;     // Alternativa 3
+
+// Testar latch blanking
+mxconfig.latch_blanking = 1;  // Default
+mxconfig.latch_blanking = 2;  // Alternativa
+mxconfig.latch_blanking = 4;  // Mais agressivo
+```
+
+**Chips do nosso painel**: SM16208SJ, DP74HC138B, MW245B, MW4953F
+
+### Vetor 5: Scan Rate Explícito via setPhysicalPanelScanRate
+
+A biblioteca tem uma função para definir explicitamente o scan rate:
+
+```cpp
+// Tentar forçar 1/4 scan explicitamente
+dma_display->setPhysicalPanelScanRate(FOUR_SCAN_16PX_HIGH);
+
+// Alternativas
+dma_display->setPhysicalPanelScanRate(FOUR_SCAN_32PX_HIGH);
+dma_display->setPhysicalPanelScanRate(FOUR_SCAN_8PX_HIGH);
+```
+
+**Nota**: Esta função pode não existir em todas as versões da biblioteca.
+
+### Vetor 6: Tratamento como Painel 16x32 (Rotação)
+
+Se o hardware realmente só suporta 16 colunas únicas, podemos tratar como 16x32 rotado:
+
+```cpp
+// Configurar como 16 colunas, 32 linhas
+HUB75_I2S_CFG mxconfig(16, 32, 1, _pins);
+
+// No drawPixel, fazer rotação:
+void drawPixel(int16_t x, int16_t y, uint16_t color) {
+    // Lógico: 32x16
+    // Físico: 16x32 rotado 90°
+    int16_t physX = y;       // Y lógico → X físico
+    int16_t physY = 31 - x;  // X lógico → Y físico (invertido)
+    baseDisplay->drawPixel(physX, physY, color);
+}
+```
+
+### Vetor 7: Double-Buffering com Mascaramento
+
+Aceitar a duplicação mas usar double-buffering para "limpar" a metade fantasma:
+
+```cpp
+void drawPixelMasked(int16_t x, int16_t y, uint16_t color) {
+    // Desenhar pixel normal
+    drawPixel(x, y, color);
+
+    // Apagar o ghost (+16)
+    int16_t ghostX = (x + 16) % 32;
+    // Só apagar se for diferente do pixel atual
+    if (ghostX != x) {
+        drawPixel(ghostX, y, 0);  // Preto
+    }
+}
+```
+
+**Problema**: Pode não funcionar se a duplicação é simultânea (mesmo clock cycle).
+
+### Vetor 8: Mapeamento Empírico Completo
+
+Criar tabela de lookup baseada em testes RAW completos:
+
+```cpp
+// Estrutura para mapear coordenadas
+struct PhysicalCoord {
+    int16_t x;
+    int16_t y;
+};
+
+// Tabela de 32x16 = 512 entradas
+const PhysicalCoord PIXEL_MAP[32][16] PROGMEM = {
+    // Preenchida com dados do DiagnosticTest Mode 2
+    {{0, 4}, {0, 5}, ...},  // x=0, y=0..15
+    {{1, 4}, {1, 5}, ...},  // x=1, y=0..15
+    // ... etc
+};
+
+void drawPixel(int16_t x, int16_t y, uint16_t color) {
+    PhysicalCoord p = pgm_read_word(&PIXEL_MAP[x][y]);
+    baseDisplay->drawPixel(p.x, p.y, color);
+}
+```
+
+### Vetor 9: Combinação mxconfig + Fórmula #677
+
+A solução mais provável requer AMBAS as alterações:
+
+```cpp
+// Passo 1: Configurar display com dimensões virtuais
+HUB75_I2S_CFG mxconfig(
+    PANEL_RES_X * 2,  // 64
+    PANEL_RES_Y / 2,  // 8
+    1,
+    _pins
+);
+mxconfig.clkphase = false;
+
+// Passo 2: Usar fórmula da issue #677
+uint8_t pxbase = 16;
+if ((coords.y & 4) == 0) {
+    coords.x += ((coords.x / pxbase) + 1) * pxbase;
+} else {
+    coords.x += (coords.x / pxbase) * pxbase;
+}
+coords.y = (coords.y >> 3) * 4 + (coords.y & 0b00000011);
+```
+
+---
+
+## 📋 Plano de Testes Sistemático
+
+### Fase 1: Testes de Configuração (Sem alterar código de remapping)
+
+| Teste | mxconfig | Esperado | Resultado |
+|-------|----------|----------|-----------|
+| A1 | 32x16x1 | Baseline (atual) | Duplicado |
+| A2 | 64x8x1 | Possível correção | ? |
+| A3 | 32x8x1 | Metade do painel | ? |
+| A4 | 16x16x2 | Chain de 2 | ? |
+| A5 | 16x8x4 | Chain de 4 | ? |
+
+### Fase 2: Testes de Algoritmo (Com mxconfig 64x8x1)
+
+| Teste | pxbase | Fórmula | Resultado |
+|-------|--------|---------|-----------|
+| B1 | 8 | Atual | ? |
+| B2 | 16 | Atual | ? |
+| B3 | 8 | #677 | ? |
+| B4 | 16 | #677 | ? |
+
+### Fase 3: Testes de Driver/Clock
+
+| Teste | Driver | clkphase | Resultado |
+|-------|--------|----------|-----------|
+| C1 | SHIFTREG | false | Atual |
+| C2 | SHIFTREG | true | ? |
+| C3 | FM6124 | false | ? |
+| C4 | FM6124 | true | ? |
+
+---
+
+## 🔗 Referências das Discussões
+
+### Issue #677 - Pontos Chave
+- Painéis com chips SM16208SJ, DP74HC138B, MW245B, MW4953F
+- Configuração `mxconfig(PANEL_RES_X * 2, PANEL_RES_Y / 2, NUM_PANELS)`
+- Algoritmo com `pxbase = 16`
+- Delay de escrita para debug visual
+- Cabos longos (>1m) podem causar problemas de sinal
+
+### Discussion #622 - Pontos Chave
+- Conceito de "pixel base" (pxbase)
+- Classe `EightPxBasePanel` derivada de VirtualMatrixPanel
+- Fórmula diferente: `(x/pxbase)*2*pxbase + pxbase + 7 - (x&0x7)`
+- Variantes para 1/5 e 1/8 scan
+- Não usar `setPhysicalPanelScanRate()` com classes custom
+
+---
+
+## ⚡ Próximas Ações Prioritárias
+
+1. **IMEDIATO**: Testar `mxconfig(64, 8, 1, _pins)` sem alterar remapping
+2. **SE FUNCIONAR**: Adaptar fórmulas para novo espaço de coordenadas
+3. **SE NÃO**: Testar classe VirtualMatrixPanel com override de getCoords()
+4. **BACKUP**: Mapeamento empírico completo via Mode 2 do DiagnosticTest
