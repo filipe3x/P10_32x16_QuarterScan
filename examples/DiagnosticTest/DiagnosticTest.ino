@@ -254,6 +254,11 @@ void showMenu() {
   Serial.println("║ 17 - Linhas horizontais (NOVA FORMULA)                ║");
   Serial.println("║ 18 - Quadrantes coloridos (NOVA FORMULA)              ║");
   Serial.println("║ 19 - Preencher tela (NOVA FORMULA)                    ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║            >>> TESTES DE DIAGNOSTICO <<<              ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║ 20 - Teste R1/R2: esquerda vs direita?                ║");
+  Serial.println("║ 21 - Teste ghost: onde aparece o duplicado?           ║");
   Serial.println("╚═══════════════════════════════════════════════════════╝");
   Serial.println("\nDigite o numero do teste:");
 }
@@ -1101,6 +1106,108 @@ void testFillScreenNewFormula() {
   waitForNext();
 }
 
+// ============ TESTES DE DIAGNOSTICO ============
+
+// Teste 20: Verificar se R1/R2 controlam esquerda/direita
+// Hipótese: R1/G1/B1 → colunas 0-15, R2/G2/B2 → colunas 16-31
+void testR1R2LeftRight() {
+  if (currentStep >= 4) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  clearScreen();
+
+  Serial.print("\n[R1/R2 TEST] Passo ");
+  Serial.print(currentStep + 1);
+  Serial.println("/4");
+
+  switch(currentStep) {
+    case 0:
+      // Desenhar apenas com driver Y 0-3 (teoricamente R1)
+      Serial.println("  Desenhando com driver Y = 0-3 (zona R1)");
+      Serial.println("  Se R1 = esquerda: so metade ESQUERDA acende");
+      Serial.println("  Se R1 = topo: so metade SUPERIOR acende");
+      for (int x = 0; x < 32; x++) {
+        for (int dy = 0; dy < 4; dy++) {
+          dma_display->drawPixel(x, dy, RED);
+        }
+      }
+      break;
+
+    case 1:
+      // Desenhar apenas com driver Y 4-7 (ainda R1, mas offset diferente)
+      Serial.println("  Desenhando com driver Y = 4-7 (zona R1 offset)");
+      Serial.println("  Se blocos impares usam Y+4: metade DIREITA acende?");
+      for (int x = 0; x < 32; x++) {
+        for (int dy = 4; dy < 8; dy++) {
+          dma_display->drawPixel(x, dy, GREEN);
+        }
+      }
+      break;
+
+    case 2:
+      // Desenhar apenas com driver Y 8-11 (teoricamente R2)
+      Serial.println("  Desenhando com driver Y = 8-11 (zona R2)");
+      Serial.println("  Se R2 = direita: so metade DIREITA acende");
+      Serial.println("  Se R2 = baixo: so metade INFERIOR acende");
+      for (int x = 0; x < 32; x++) {
+        for (int dy = 8; dy < 12; dy++) {
+          dma_display->drawPixel(x, dy, BLUE);
+        }
+      }
+      break;
+
+    case 3:
+      // Desenhar apenas com driver Y 12-15 (R2 offset)
+      Serial.println("  Desenhando com driver Y = 12-15 (zona R2 offset)");
+      for (int x = 0; x < 32; x++) {
+        for (int dy = 12; dy < 16; dy++) {
+          dma_display->drawPixel(x, dy, YELLOW);
+        }
+      }
+      break;
+  }
+
+  Serial.println("\n  -> OBSERVE: Qual parte do painel acendeu?");
+  Serial.println("     ESQUERDA/DIREITA ou SUPERIOR/INFERIOR?");
+
+  waitForNext();
+}
+
+// Teste 21: Mapear exatamente onde aparecem os ghosts
+void testGhostMapping() {
+  if (currentStep >= 8) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  clearScreen();
+
+  int testX = (currentStep % 4) * 8;  // 0, 8, 16, 24
+  int testY = (currentStep / 4) * 4;  // 0, 4
+
+  // Desenhar um único pixel RAW
+  dma_display->drawPixel(testX, testY, WHITE);
+
+  Serial.print("\n[GHOST TEST] Driver coord: (");
+  Serial.print(testX);
+  Serial.print(", ");
+  Serial.print(testY);
+  Serial.println(")");
+  Serial.println("\n  OBSERVE e ANOTE:");
+  Serial.println("  1. Quantos pixeis acendem?");
+  Serial.println("  2. Posicao do PRIMEIRO pixel (coluna, linha)?");
+  Serial.println("  3. Posicao do SEGUNDO pixel (se existir)?");
+  Serial.println("  4. Diferenca entre eles: +16 colunas? +8 linhas? Outro?");
+
+  waitForNext();
+}
+
 // ============ SETUP ============
 
 void setup() {
@@ -1161,7 +1268,7 @@ void loop() {
       input.trim();
       int mode = input.toInt();
 
-      if (mode >= 1 && mode <= 19) {
+      if (mode >= 1 && mode <= 21) {
         currentMode = mode;
         currentStep = 0;
         Serial.print("\nIniciando teste ");
@@ -1196,6 +1303,9 @@ void loop() {
     case 17: testHorizontalLinesNewFormula(); break;
     case 18: testQuadrantsNewFormula(); break;
     case 19: testFillScreenNewFormula(); break;
+    // Testes de diagnostico
+    case 20: testR1R2LeftRight(); break;
+    case 21: testGhostMapping(); break;
     default:
       currentMode = 0;
       showMenu();
