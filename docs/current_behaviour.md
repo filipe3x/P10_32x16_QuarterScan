@@ -572,3 +572,62 @@ The duplication is **HARDWARE BEHAVIOR** inherent to 1/4 scan panels. The fix re
 1. Use only 16 unique X addresses (0-15) instead of 32
 2. Encode the 8-column block selection in the Y row address
 3. Each logical Y has 4 sub-rows for the 4 blocks of 8 columns
+
+---
+
+## Test Results: R1/R2 and Ghost Behavior (Modes 20-21)
+
+### Mode 20: R1/R2 Test Results
+
+| Step | Driver Y | Visual Result | Conclusion |
+|------|----------|---------------|------------|
+| 1 | 0-3 | Top half RED | R1 = Top |
+| 2 | 4-7 | Top half GREEN | Still R1 (modulo 4) |
+| 3 | 8-11 | Bottom half BLUE | R2 = Bottom |
+| 4 | 12-15 | Bottom half YELLOW | Still R2 |
+
+**Confirmed: R1/R2 control TOP/BOTTOM, NOT left/right.**
+
+The +16 column ghost is caused by the shift register architecture, not R1/R2 addressing.
+
+### Why Modes 17 and 19 Work (But Mode 16 Shows Duplication)
+
+The current formula v3 maps both X=0 and X=16 to the SAME driver coordinates:
+
+```
+For X=0, Y=0:
+  rightHalf=false, localY<4
+  → driverX=0, driverY=0
+  → Physical: (0,0) + ghost (16,0)
+
+For X=16, Y=0:
+  rightHalf=true, localY<4 → SWAP to blocks 0,2
+  → driverX=0, driverY=0  ← SAME AS X=0!
+  → Physical: (0,0) + ghost (16,0)
+```
+
+**Result:**
+- When filling (Mode 19): Both X=0 and X=16 write same color → looks correct
+- When drawing single pixel (Mode 16): X=0 writes → ghost appears at X=16
+
+### Fundamental Hardware Limitation
+
+The panel's shift register design means:
+- **Columns 0-7 and 16-23 are ALWAYS identical** (same data line)
+- **Columns 8-15 and 24-31 are ALWAYS identical** (same data line)
+
+This is NOT a software bug - it's how 1/4 scan panels work. Each "unique" pixel write affects TWO physical columns (+16 offset).
+
+### Implications for Display Usage
+
+1. **For solid fills**: Works perfectly (Mode 19)
+2. **For horizontal lines**: Works perfectly (Mode 17)
+3. **For text/graphics**: The "ghost" at +16 columns is visible
+4. **For truly independent 32 columns**: May require treating as 16x32 (rotated) or different hardware
+
+### Possible Solutions to Explore
+
+1. **Accept 16 unique columns**: Use only X 0-15, let ghosts fill 16-31
+2. **Different row mapping**: Put X 0-15 and X 16-31 on different physical rows
+3. **Hardware configuration**: Check if panel has jumpers/settings for column splitting
+4. **Alternative library config**: Try `mxconfig` with different panel chain settings
