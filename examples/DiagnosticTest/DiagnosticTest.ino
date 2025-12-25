@@ -91,6 +91,36 @@ void drawPixelRaw(int16_t x, int16_t y, uint16_t color) {
   dma_display->drawPixel(x, y, color);
 }
 
+// ============ NOVA FORMULA PROPOSTA (baseada em dados RAW) ============
+// Esta função implementa a descoberta de que:
+// - O hardware só tem 16 endereços X únicos (não 32)
+// - A seleção de bloco de 8 colunas é codificada no endereço Y
+// - Blocos 0,2 usam row offset 0; Blocos 1,3 usam row offset +4
+
+void drawPixelNewFormula(int16_t x, int16_t y, uint16_t color) {
+  if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
+
+  int block = x / 8;                    // 0, 1, 2, ou 3
+  int localX = x % 8;                   // 0-7 dentro do bloco
+
+  // Blocos 0,1 usam X físico 0-7; Blocos 2,3 usam X físico 8-15
+  int physX = (block < 2) ? localX : (localX + 8);
+
+  // Blocos 0,2 usam row offset 0; Blocos 1,3 usam row offset +4
+  int rowOffset = (block % 2 == 0) ? 0 : 4;
+
+  // Aplicar remapY existente (troca de blocos de 4 linhas)
+  int baseY = remapY(y);
+
+  // Adicionar offset de bloco
+  int physY = baseY + rowOffset;
+
+  // Seleção de metade superior/inferior
+  if (y >= 8) physY += 8;
+
+  dma_display->drawPixel(physX, physY, color);
+}
+
 // ============ CORES ============
 uint16_t RED, GREEN, BLUE, WHITE, YELLOW, CYAN, MAGENTA;
 
@@ -175,6 +205,13 @@ void showMenu() {
   Serial.println("║ 13 - Teste de X fixo (todas Y de uma coluna)          ║");
   Serial.println("║ 14 - Grid 8x8 marcadores                              ║");
   Serial.println("║ 15 - Preencher tela inteira (teste basico)            ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║        >>> NOVA FORMULA (baseada em RAW data) <<<     ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║ 16 - Pixel a pixel (NOVA FORMULA)                     ║");
+  Serial.println("║ 17 - Linhas horizontais (NOVA FORMULA)                ║");
+  Serial.println("║ 18 - Quadrantes coloridos (NOVA FORMULA)              ║");
+  Serial.println("║ 19 - Preencher tela (NOVA FORMULA)                    ║");
   Serial.println("╚═══════════════════════════════════════════════════════╝");
   Serial.println("\nDigite o numero do teste:");
 }
@@ -844,6 +881,165 @@ void testFillScreen() {
   waitForNext();
 }
 
+// ============ TESTES NOVA FORMULA ============
+
+// Teste 16: Pixel a pixel com NOVA FORMULA
+void testPixelByPixelNewFormula() {
+  int totalPixels = 32 * 16;
+  if (currentStep >= totalPixels) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  int x = currentStep % 32;
+  int y = currentStep / 32;
+
+  clearScreen();
+  drawPixelNewFormula(x, y, GREEN);
+
+  // Calcular valores da nova formula para debug
+  int block = x / 8;
+  int localX = x % 8;
+  int physX = (block < 2) ? localX : (localX + 8);
+  int rowOffset = (block % 2 == 0) ? 0 : 4;
+  int baseY = remapY(y);
+  int physY = baseY + rowOffset;
+  if (y >= 8) physY += 8;
+
+  Serial.print("\n[NOVA FORMULA] Pixel ");
+  Serial.print(currentStep + 1);
+  Serial.print("/");
+  Serial.println(totalPixels);
+  Serial.print("  Logico: (");
+  Serial.print(x);
+  Serial.print(", ");
+  Serial.print(y);
+  Serial.print(") -> Fisico: (");
+  Serial.print(physX);
+  Serial.print(", ");
+  Serial.print(physY);
+  Serial.println(")");
+  Serial.print("  Block=");
+  Serial.print(block);
+  Serial.print(", localX=");
+  Serial.print(localX);
+  Serial.print(", rowOffset=");
+  Serial.println(rowOffset);
+  Serial.println("  -> OBSERVE: Aparece UM pixel ou DOIS? Posicao correta?");
+
+  waitForNext();
+}
+
+// Teste 17: Linhas horizontais com NOVA FORMULA
+void testHorizontalLinesNewFormula() {
+  if (currentStep >= 16) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  clearScreen();
+  for (int x = 0; x < 32; x++) {
+    drawPixelNewFormula(x, currentStep, GREEN);
+  }
+
+  Serial.print("\n[NOVA FORMULA] Linha horizontal Y=");
+  Serial.println(currentStep);
+  Serial.println("  -> OBSERVE: A linha esta CONTINUA sem quebras?");
+  Serial.println("             Aparece em UMA so linha fisica?");
+
+  waitForNext();
+}
+
+// Teste 18: Quadrantes coloridos NOVA FORMULA
+void testQuadrantsNewFormula() {
+  if (currentStep >= 4) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  clearScreen();
+
+  int startX = (currentStep % 2) * 16;
+  int startY = (currentStep / 2) * 8;
+  uint16_t color;
+  const char* colorName;
+
+  switch(currentStep) {
+    case 0: color = RED; colorName = "VERMELHO (sup-esq)"; break;
+    case 1: color = GREEN; colorName = "VERDE (sup-dir)"; break;
+    case 2: color = BLUE; colorName = "AZUL (inf-esq)"; break;
+    case 3: color = YELLOW; colorName = "AMARELO (inf-dir)"; break;
+  }
+
+  for (int y = startY; y < startY + 8; y++) {
+    for (int x = startX; x < startX + 16; x++) {
+      drawPixelNewFormula(x, y, color);
+    }
+  }
+
+  Serial.print("\n[NOVA FORMULA] Quadrante ");
+  Serial.print(currentStep + 1);
+  Serial.print("/4 - ");
+  Serial.println(colorName);
+  Serial.print("  Area logica: X=");
+  Serial.print(startX);
+  Serial.print("-");
+  Serial.print(startX + 15);
+  Serial.print(", Y=");
+  Serial.print(startY);
+  Serial.print("-");
+  Serial.println(startY + 7);
+  Serial.println("  -> OBSERVE: O quadrante preenche a area CORRETA?");
+  Serial.println("             Sem duplicacao ou sobreposicao?");
+
+  waitForNext();
+}
+
+// Teste 19: Preencher tela inteira NOVA FORMULA
+void testFillScreenNewFormula() {
+  if (currentStep >= 6) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  clearScreen();
+
+  uint16_t color;
+  const char* colorName;
+
+  switch(currentStep) {
+    case 0: color = RED; colorName = "VERMELHO"; break;
+    case 1: color = GREEN; colorName = "VERDE"; break;
+    case 2: color = BLUE; colorName = "AZUL"; break;
+    case 3: color = WHITE; colorName = "BRANCO"; break;
+    case 4: color = YELLOW; colorName = "AMARELO"; break;
+    case 5: color = CYAN; colorName = "CIANO"; break;
+  }
+
+  // Preencher com nova formula
+  for (int y = 0; y < 16; y++) {
+    for (int x = 0; x < 32; x++) {
+      drawPixelNewFormula(x, y, color);
+    }
+  }
+
+  Serial.print("\n[NOVA FORMULA] Tela inteira - ");
+  Serial.println(colorName);
+  Serial.println("  -> OBSERVE: Toda a tela esta preenchida uniformemente?");
+  Serial.println("             Existem linhas ou areas falhadas?");
+  Serial.println("             COMPARA com teste 15 (wrapper antigo)!");
+
+  waitForNext();
+}
+
 // ============ SETUP ============
 
 void setup() {
@@ -904,7 +1100,7 @@ void loop() {
       input.trim();
       int mode = input.toInt();
 
-      if (mode >= 1 && mode <= 15) {
+      if (mode >= 1 && mode <= 19) {
         currentMode = mode;
         currentStep = 0;
         Serial.print("\nIniciando teste ");
@@ -934,6 +1130,11 @@ void loop() {
     case 13: testFixedX(); break;
     case 14: testGrid8x8(); break;
     case 15: testFillScreen(); break;
+    // Testes com NOVA FORMULA
+    case 16: testPixelByPixelNewFormula(); break;
+    case 17: testHorizontalLinesNewFormula(); break;
+    case 18: testQuadrantsNewFormula(); break;
+    case 19: testFillScreenNewFormula(); break;
     default:
       currentMode = 0;
       showMenu();
