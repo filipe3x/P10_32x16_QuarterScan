@@ -56,6 +56,101 @@ For any drawPixel(x, y):
 
 ---
 
+## RAW Mode Test Results (Mode 2 - Critical Discovery!)
+
+### Test Data Summary (Logical Y=0)
+
+| Driver Coord | Physical Position 1 | Physical Position 2 | Physical Row |
+|--------------|---------------------|---------------------|--------------|
+| (0-7, 0)     | cols 1-8            | cols 17-24          | row 1        |
+| (8-15, 0)    | cols 1-8            | cols 17-24          | **row 5**    |
+| (16-23, 0)   | cols 9-16           | cols 25-32          | row 1        |
+| (24-31, 0)   | cols 9-16           | cols 25-32          | **row 5**    |
+| (0-7, 1)     | ...                 | ...                 | row 2        |
+
+*Physical positions in 1-indexed notation*
+
+### Pattern Discovery: 8-Column Block Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          RAW DRIVER COLUMN MAPPING                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   Driver X 0-7        Driver X 8-15       Driver X 16-23      Driver X 24-31│
+│   ┌─────────┐         ┌─────────┐         ┌─────────┐         ┌─────────┐  │
+│   │ Row 0   │         │ Row 4   │         │ Row 0   │         │ Row 4   │  │
+│   │         │         │         │         │         │         │         │  │
+│   │ Phys    │         │ Phys    │         │ Phys    │         │ Phys    │  │
+│   │ 0-7     │         │ 0-7     │         │ 8-15    │         │ 8-15    │  │
+│   │  AND    │         │  AND    │         │  AND    │         │  AND    │  │
+│   │ 16-23   │         │ 16-23   │         │ 24-31   │         │ 24-31   │  │
+│   └─────────┘         └─────────┘         └─────────┘         └─────────┘  │
+│                                                                             │
+│   BLOCK 0             BLOCK 1             BLOCK 2             BLOCK 3      │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Critical Insights from RAW Mode
+
+1. **Duplication is HARDWARE, not software!**
+   - Every driver write produces TWO physical columns (+16 offset)
+   - This is inherent to the 1/4 scan shift register design
+   - **CANNOT be eliminated** - must be worked around
+
+2. **8-Column Blocks with Row Alternation**
+   - Driver X 0-7 → Physical row 0 (for logical Y=0)
+   - Driver X 8-15 → Physical row 4 (different row!)
+   - Driver X 16-23 → Physical row 0 (same as X 0-7)
+   - Driver X 24-31 → Physical row 4 (same as X 8-15)
+
+3. **Column Grouping**
+   - Blocks 0 & 1 (X 0-15) share physical columns 0-7 AND 16-23
+   - Blocks 2 & 3 (X 16-31) share physical columns 8-15 AND 24-31
+   - The row address determines which block is visible
+
+4. **The Wrapper Problem**
+   - Current wrapper uses same row for X 0-15 AND X 16-31
+   - This causes overlap: X=0 and X=16 both write to row 0
+   - Result: duplication we observed
+
+### Solution Derived from RAW Data
+
+To display 32 unique columns on this hardware:
+
+```
+Logical X 0-7:   → Driver X = 0-7,   Driver Row = base_row
+Logical X 8-15:  → Driver X = 0-7,   Driver Row = base_row + 4 (DIFFERENT!)
+Logical X 16-23: → Driver X = 8-15,  Driver Row = base_row
+Logical X 24-31: → Driver X = 8-15,  Driver Row = base_row + 4 (DIFFERENT!)
+```
+
+**Key**: Use the ROW ADDRESS to select which 8-column segment is active!
+
+### Proposed remapX Formula (Based on RAW Data)
+
+```cpp
+void drawPixel(int16_t x, int16_t y, uint16_t color) {
+    int block = x / 8;                    // 0, 1, 2, or 3
+    int localX = x % 8;                   // 0-7 within block
+
+    // Blocks 0,1 use physical X 0-7; Blocks 2,3 use physical X 8-15
+    int physX = (block < 2) ? localX : (localX + 8);
+
+    // Blocks 0,2 use row offset 0; Blocks 1,3 use row offset +4
+    int rowOffset = (block % 2 == 0) ? 0 : 4;
+
+    int baseY = remapY(y);
+    int physY = baseY + rowOffset;
+
+    if (y >= 8) physY += 8;  // Top/bottom half selection
+
+    baseDisplay->drawPixel(physX, physY, color);
+}
+```
+
+---
+
 ## Root Cause Analysis
 
 ### Hardware Architecture (1/4 Scan)
@@ -302,12 +397,15 @@ Draw a 16x8 grid using only base columns 0-15 and observe if any half of the pan
 
 ---
 
-## Constraints for Fix
+## Constraints for Fix (UPDATED based on RAW data)
 
-1. **DO NOT modify `remapY()`** - Y-axis block swapping is confirmed working
+1. ~~**DO NOT modify `remapY()`**~~ → **MUST modify how Y is calculated!**
+   - RAW data proves that row address encodes the 8-column block selection
+   - The fix requires adding row offset based on X position
 2. **Horizontal lines work** - Don't break sequential X drawing
 3. **Must work for single pixels AND sequences** - Text rendering depends on this
-4. **Output must be in valid range** - baseDisplay expects 0-31 for X, 0-15 for Y
+4. **Output must be in valid range** - baseDisplay expects 0-15 for X (not 0-31!), 0-15 for Y
+5. **NEW: X range is 0-15, not 0-31!** - The driver only has 16 unique column addresses per row
 
 ---
 
@@ -463,6 +561,14 @@ Mode 14: Grid 8x8 - Test reference points
 ## Document Version
 
 - **Created**: Based on DiagnosticTest Mode 1 observations
+- **Updated**: Added RAW mode (Mode 2) test results - CRITICAL DISCOVERY
 - **Panel**: P10 32x16 outdoor, 1/4 scan, SMD3535
 - **Firmware**: ESP32 with ESP32-HUB75-MatrixPanel-I2S-DMA
-- **Status**: Duplication problem documented, awaiting RAW mode data
+- **Status**: ✅ ROOT CAUSE IDENTIFIED - Ready for implementation
+
+### Key Discovery Summary
+
+The duplication is **HARDWARE BEHAVIOR** inherent to 1/4 scan panels. The fix requires:
+1. Use only 16 unique X addresses (0-15) instead of 32
+2. Encode the 8-column block selection in the Y row address
+3. Each logical Y has 4 sub-rows for the 4 blocks of 8 columns
