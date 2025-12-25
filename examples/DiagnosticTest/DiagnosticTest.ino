@@ -91,6 +91,78 @@ void drawPixelRaw(int16_t x, int16_t y, uint16_t color) {
   dma_display->drawPixel(x, y, color);
 }
 
+// ============ NOVA FORMULA PROPOSTA (baseada em dados RAW) ============
+//
+// DESCOBERTAS CRÍTICAS:
+// 1. O hardware faz physical_row = (driver_Y % 4) + row_offset
+// 2. Blocos 0,2 (X 0-7, 16-23): row_offset = 0 → só acedem a linhas físicas 0-3
+// 3. Blocos 1,3 (X 8-15, 24-31): row_offset = 4 → só acedem a linhas físicas 4-7
+// 4. Driver Y=0 e Y=4 produzem a MESMA linha física!
+//
+// IMPLICAÇÃO: Cada linha lógica está ESPALHADA por duas linhas físicas!
+// - Colunas 0-15 (via blocos 0,2) estão nas linhas físicas 0-3
+// - Colunas 16-31 (via blocos 1,3) estão nas linhas físicas 4-7
+//
+// NOVA ABORDAGEM: Aceitar a arquitetura intercalada do painel
+
+void drawPixelNewFormula(int16_t x, int16_t y, uint16_t color) {
+  if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
+
+  // Determinar metade esquerda/direita e posição dentro
+  bool rightHalf = (x >= 16);  // Metade direita do painel
+  int halfX = x % 16;          // 0-15 dentro de cada metade
+  int blockInHalf = halfX / 8; // 0 ou 1 dentro da metade
+  int pixelInBlock = halfX % 8; // 0-7 dentro do bloco
+
+  // Metade superior/inferior do painel
+  bool bottomPanel = (y >= 8);
+  int localY = y % 8;  // 0-7 dentro de cada metade vertical
+
+  int driverX, driverY;
+
+  if (!rightHalf) {
+    // METADE ESQUERDA (X 0-15): usar blocos 0,2
+    // Estes blocos dão linhas físicas 0-3 (via driver_Y % 4)
+    driverX = (blockInHalf == 0) ? pixelInBlock : (pixelInBlock + 16);
+
+    // Para Y lógico 0-3: queremos linha física 0-3 → driverY = 0-3
+    // Para Y lógico 4-7: queremos linha física 4-7, MAS blocos 0,2 só dão 0-3!
+    //   Solução: trocar para blocos 1,3 (ver else abaixo)
+    if (localY < 4) {
+      driverY = localY;  // 0-3 → linha física 0-3 ✓
+    } else {
+      // Y 4-7: blocos 0,2 dariam linha física 0-3 (errado!)
+      // Precisamos usar blocos 1,3 que dão linha física 4-7
+      // Isso significa mudar o driverX para o range dos blocos 1,3
+      driverX = (blockInHalf == 0) ? (pixelInBlock + 8) : (pixelInBlock + 24);
+      driverY = localY - 4;  // 0-3 → hardware adiciona +4 → linha física 4-7 ✓
+    }
+  } else {
+    // METADE DIREITA (X 16-31): usar blocos 1,3
+    // Estes blocos dão linhas físicas 4-7 (via (driver_Y % 4) + 4)
+    driverX = (blockInHalf == 0) ? (pixelInBlock + 8) : (pixelInBlock + 24);
+
+    // Para Y lógico 4-7: queremos linha física 4-7 → driverY = 0-3, hardware +4 = 4-7 ✓
+    // Para Y lógico 0-3: queremos linha física 0-3, MAS blocos 1,3 só dão 4-7!
+    //   Solução: trocar para blocos 0,2
+    if (localY >= 4) {
+      driverY = localY - 4;  // 0-3 → hardware +4 → linha física 4-7 ✓
+    } else {
+      // Y 0-3: blocos 1,3 dariam linha física 4-7 (errado!)
+      // Precisamos usar blocos 0,2 que dão linha física 0-3
+      driverX = (blockInHalf == 0) ? pixelInBlock : (pixelInBlock + 16);
+      driverY = localY;  // 0-3 → linha física 0-3 ✓
+    }
+  }
+
+  // Adicionar offset para metade inferior do painel
+  if (bottomPanel) {
+    driverY += 8;
+  }
+
+  dma_display->drawPixel(driverX, driverY, color);
+}
+
 // ============ CORES ============
 uint16_t RED, GREEN, BLUE, WHITE, YELLOW, CYAN, MAGENTA;
 
@@ -175,6 +247,18 @@ void showMenu() {
   Serial.println("║ 13 - Teste de X fixo (todas Y de uma coluna)          ║");
   Serial.println("║ 14 - Grid 8x8 marcadores                              ║");
   Serial.println("║ 15 - Preencher tela inteira (teste basico)            ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║        >>> NOVA FORMULA (baseada em RAW data) <<<     ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║ 16 - Pixel a pixel (NOVA FORMULA)                     ║");
+  Serial.println("║ 17 - Linhas horizontais (NOVA FORMULA)                ║");
+  Serial.println("║ 18 - Quadrantes coloridos (NOVA FORMULA)              ║");
+  Serial.println("║ 19 - Preencher tela (NOVA FORMULA)                    ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║            >>> TESTES DE DIAGNOSTICO <<<              ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║ 20 - Teste R1/R2: esquerda vs direita?                ║");
+  Serial.println("║ 21 - Teste ghost: onde aparece o duplicado?           ║");
   Serial.println("╚═══════════════════════════════════════════════════════╝");
   Serial.println("\nDigite o numero do teste:");
 }
@@ -844,6 +928,286 @@ void testFillScreen() {
   waitForNext();
 }
 
+// ============ TESTES NOVA FORMULA ============
+
+// Teste 16: Pixel a pixel com NOVA FORMULA
+void testPixelByPixelNewFormula() {
+  int totalPixels = 32 * 16;
+  if (currentStep >= totalPixels) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  int x = currentStep % 32;
+  int y = currentStep / 32;
+
+  clearScreen();
+  drawPixelNewFormula(x, y, GREEN);
+
+  // Calcular valores da nova formula v3 para debug
+  bool rightHalf = (x >= 16);
+  int halfX = x % 16;
+  int blockInHalf = halfX / 8;
+  int pixelInBlock = halfX % 8;
+  bool bottomPanel = (y >= 8);
+  int localY = y % 8;
+  int driverX, driverY;
+
+  if (!rightHalf) {
+    driverX = (blockInHalf == 0) ? pixelInBlock : (pixelInBlock + 16);
+    if (localY < 4) {
+      driverY = localY;
+    } else {
+      driverX = (blockInHalf == 0) ? (pixelInBlock + 8) : (pixelInBlock + 24);
+      driverY = localY - 4;
+    }
+  } else {
+    driverX = (blockInHalf == 0) ? (pixelInBlock + 8) : (pixelInBlock + 24);
+    if (localY >= 4) {
+      driverY = localY - 4;
+    } else {
+      driverX = (blockInHalf == 0) ? pixelInBlock : (pixelInBlock + 16);
+      driverY = localY;
+    }
+  }
+  if (bottomPanel) driverY += 8;
+
+  Serial.print("\n[NOVA FORMULA v3] Pixel ");
+  Serial.print(currentStep + 1);
+  Serial.print("/");
+  Serial.println(totalPixels);
+  Serial.print("  Logico: (");
+  Serial.print(x);
+  Serial.print(", ");
+  Serial.print(y);
+  Serial.print(") -> Driver: (");
+  Serial.print(driverX);
+  Serial.print(", ");
+  Serial.print(driverY);
+  Serial.println(")");
+  Serial.print("  rightHalf=");
+  Serial.print(rightHalf ? "sim" : "nao");
+  Serial.print(", localY=");
+  Serial.print(localY);
+  Serial.print(", bottomPanel=");
+  Serial.println(bottomPanel ? "sim" : "nao");
+  Serial.println("  -> OBSERVE: Pixel na posicao CORRETA? Sem duplicacao?");
+
+  waitForNext();
+}
+
+// Teste 17: Linhas horizontais com NOVA FORMULA
+void testHorizontalLinesNewFormula() {
+  if (currentStep >= 16) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  clearScreen();
+  for (int x = 0; x < 32; x++) {
+    drawPixelNewFormula(x, currentStep, GREEN);
+  }
+
+  Serial.print("\n[NOVA FORMULA] Linha horizontal Y=");
+  Serial.println(currentStep);
+  Serial.println("  -> OBSERVE: A linha esta CONTINUA sem quebras?");
+  Serial.println("             Aparece em UMA so linha fisica?");
+
+  waitForNext();
+}
+
+// Teste 18: Quadrantes coloridos NOVA FORMULA
+void testQuadrantsNewFormula() {
+  if (currentStep >= 4) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  clearScreen();
+
+  int startX = (currentStep % 2) * 16;
+  int startY = (currentStep / 2) * 8;
+  uint16_t color;
+  const char* colorName;
+
+  switch(currentStep) {
+    case 0: color = RED; colorName = "VERMELHO (sup-esq)"; break;
+    case 1: color = GREEN; colorName = "VERDE (sup-dir)"; break;
+    case 2: color = BLUE; colorName = "AZUL (inf-esq)"; break;
+    case 3: color = YELLOW; colorName = "AMARELO (inf-dir)"; break;
+  }
+
+  for (int y = startY; y < startY + 8; y++) {
+    for (int x = startX; x < startX + 16; x++) {
+      drawPixelNewFormula(x, y, color);
+    }
+  }
+
+  Serial.print("\n[NOVA FORMULA] Quadrante ");
+  Serial.print(currentStep + 1);
+  Serial.print("/4 - ");
+  Serial.println(colorName);
+  Serial.print("  Area logica: X=");
+  Serial.print(startX);
+  Serial.print("-");
+  Serial.print(startX + 15);
+  Serial.print(", Y=");
+  Serial.print(startY);
+  Serial.print("-");
+  Serial.println(startY + 7);
+  Serial.println("  -> OBSERVE: O quadrante preenche a area CORRETA?");
+  Serial.println("             Sem duplicacao ou sobreposicao?");
+
+  waitForNext();
+}
+
+// Teste 19: Preencher tela inteira NOVA FORMULA
+void testFillScreenNewFormula() {
+  if (currentStep >= 6) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  clearScreen();
+
+  uint16_t color;
+  const char* colorName;
+
+  switch(currentStep) {
+    case 0: color = RED; colorName = "VERMELHO"; break;
+    case 1: color = GREEN; colorName = "VERDE"; break;
+    case 2: color = BLUE; colorName = "AZUL"; break;
+    case 3: color = WHITE; colorName = "BRANCO"; break;
+    case 4: color = YELLOW; colorName = "AMARELO"; break;
+    case 5: color = CYAN; colorName = "CIANO"; break;
+  }
+
+  // Preencher com nova formula
+  for (int y = 0; y < 16; y++) {
+    for (int x = 0; x < 32; x++) {
+      drawPixelNewFormula(x, y, color);
+    }
+  }
+
+  Serial.print("\n[NOVA FORMULA] Tela inteira - ");
+  Serial.println(colorName);
+  Serial.println("  -> OBSERVE: Toda a tela esta preenchida uniformemente?");
+  Serial.println("             Existem linhas ou areas falhadas?");
+  Serial.println("             COMPARA com teste 15 (wrapper antigo)!");
+
+  waitForNext();
+}
+
+// ============ TESTES DE DIAGNOSTICO ============
+
+// Teste 20: Verificar se R1/R2 controlam esquerda/direita
+// Hipótese: R1/G1/B1 → colunas 0-15, R2/G2/B2 → colunas 16-31
+void testR1R2LeftRight() {
+  if (currentStep >= 4) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  clearScreen();
+
+  Serial.print("\n[R1/R2 TEST] Passo ");
+  Serial.print(currentStep + 1);
+  Serial.println("/4");
+
+  switch(currentStep) {
+    case 0:
+      // Desenhar apenas com driver Y 0-3 (teoricamente R1)
+      Serial.println("  Desenhando com driver Y = 0-3 (zona R1)");
+      Serial.println("  Se R1 = esquerda: so metade ESQUERDA acende");
+      Serial.println("  Se R1 = topo: so metade SUPERIOR acende");
+      for (int x = 0; x < 32; x++) {
+        for (int dy = 0; dy < 4; dy++) {
+          dma_display->drawPixel(x, dy, RED);
+        }
+      }
+      break;
+
+    case 1:
+      // Desenhar apenas com driver Y 4-7 (ainda R1, mas offset diferente)
+      Serial.println("  Desenhando com driver Y = 4-7 (zona R1 offset)");
+      Serial.println("  Se blocos impares usam Y+4: metade DIREITA acende?");
+      for (int x = 0; x < 32; x++) {
+        for (int dy = 4; dy < 8; dy++) {
+          dma_display->drawPixel(x, dy, GREEN);
+        }
+      }
+      break;
+
+    case 2:
+      // Desenhar apenas com driver Y 8-11 (teoricamente R2)
+      Serial.println("  Desenhando com driver Y = 8-11 (zona R2)");
+      Serial.println("  Se R2 = direita: so metade DIREITA acende");
+      Serial.println("  Se R2 = baixo: so metade INFERIOR acende");
+      for (int x = 0; x < 32; x++) {
+        for (int dy = 8; dy < 12; dy++) {
+          dma_display->drawPixel(x, dy, BLUE);
+        }
+      }
+      break;
+
+    case 3:
+      // Desenhar apenas com driver Y 12-15 (R2 offset)
+      Serial.println("  Desenhando com driver Y = 12-15 (zona R2 offset)");
+      for (int x = 0; x < 32; x++) {
+        for (int dy = 12; dy < 16; dy++) {
+          dma_display->drawPixel(x, dy, YELLOW);
+        }
+      }
+      break;
+  }
+
+  Serial.println("\n  -> OBSERVE: Qual parte do painel acendeu?");
+  Serial.println("     ESQUERDA/DIREITA ou SUPERIOR/INFERIOR?");
+
+  waitForNext();
+}
+
+// Teste 21: Mapear exatamente onde aparecem os ghosts
+void testGhostMapping() {
+  if (currentStep >= 8) {
+    Serial.println("\n=== TESTE COMPLETO ===");
+    currentMode = 0;
+    currentStep = 0;
+    return;
+  }
+
+  clearScreen();
+
+  int testX = (currentStep % 4) * 8;  // 0, 8, 16, 24
+  int testY = (currentStep / 4) * 4;  // 0, 4
+
+  // Desenhar um único pixel RAW
+  dma_display->drawPixel(testX, testY, WHITE);
+
+  Serial.print("\n[GHOST TEST] Driver coord: (");
+  Serial.print(testX);
+  Serial.print(", ");
+  Serial.print(testY);
+  Serial.println(")");
+  Serial.println("\n  OBSERVE e ANOTE:");
+  Serial.println("  1. Quantos pixeis acendem?");
+  Serial.println("  2. Posicao do PRIMEIRO pixel (coluna, linha)?");
+  Serial.println("  3. Posicao do SEGUNDO pixel (se existir)?");
+  Serial.println("  4. Diferenca entre eles: +16 colunas? +8 linhas? Outro?");
+
+  waitForNext();
+}
+
 // ============ SETUP ============
 
 void setup() {
@@ -904,7 +1268,7 @@ void loop() {
       input.trim();
       int mode = input.toInt();
 
-      if (mode >= 1 && mode <= 15) {
+      if (mode >= 1 && mode <= 21) {
         currentMode = mode;
         currentStep = 0;
         Serial.print("\nIniciando teste ");
@@ -934,6 +1298,14 @@ void loop() {
     case 13: testFixedX(); break;
     case 14: testGrid8x8(); break;
     case 15: testFillScreen(); break;
+    // Testes com NOVA FORMULA
+    case 16: testPixelByPixelNewFormula(); break;
+    case 17: testHorizontalLinesNewFormula(); break;
+    case 18: testQuadrantsNewFormula(); break;
+    case 19: testFillScreenNewFormula(); break;
+    // Testes de diagnostico
+    case 20: testR1R2LeftRight(); break;
+    case 21: testGhostMapping(); break;
     default:
       currentMode = 0;
       showMenu();
