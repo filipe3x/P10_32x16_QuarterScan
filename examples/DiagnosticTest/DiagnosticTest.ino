@@ -281,40 +281,40 @@ bool reinitDisplay32x16() {
   return true;
 }
 
-// Fórmula #677 para config 64x8
+// Fórmula #680 para config 64x8
 // Entrada: coordenadas lógicas 32x16
 // Saída: desenha no display 64x8 com mapeamento correto
 //
-// SOLUÇÃO FINAL DA ISSUE #677:
-// O dono da biblioteca sugeriu: "try the last code, but set pixel base 1"
-// Com pxbase=1, a fórmula duplica o X:
-// - y&4 == 0: driverX = x + (x+1) = 2x + 1
-// - y&4 != 0: driverX = x + x = 2x
+// SOLUÇÃO DA ISSUE #680:
+// pxbase=8 com lógica INVERTIDA corrige ordem das linhas (1-2-3-4)
+// - y&4 == 0: driverX = x + (x/8)*8
+// - y&4 != 0: driverX = x + ((x/8)+1)*8
 //
 void drawPixelFormula677(int16_t x, int16_t y, uint16_t color) {
   if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
 
-  // Fórmula #677 com pxbase = 1 (solução final!)
-  uint8_t pxbase = 1;
+  // Fórmula #680 - pxbase=8 com lógica INVERTIDA vs #677
+  // Isto corrige a ordem das linhas (1-2-3-4 em vez de 2-1-4-3)
+  uint8_t pxbase = 8;
   int16_t driverX = x;
   int16_t driverY = y;
 
   // Transformação Y: comprime 16 linhas em 8, alternando blocos de 4
   driverY = ((y >> 3) * 4) + (y & 0b00000011);
 
-  // Transformação X com pxbase = 1 (duplica o X)
+  // Transformação X com pxbase = 8 (LÓGICA INVERTIDA vs #677!)
   if ((y & 4) == 0) {
-    // Linhas 0-3 e 8-11: driverX = x + (x+1) = 2x + 1
-    driverX = x + ((x / pxbase) + 1) * pxbase;
-  } else {
-    // Linhas 4-7 e 12-15: driverX = x + x = 2x
+    // Linhas 0-3 e 8-11: x += (x/8)*8
     driverX = x + (x / pxbase) * pxbase;
+  } else {
+    // Linhas 4-7 e 12-15: x += ((x/8)+1)*8
+    driverX = x + ((x / pxbase) + 1) * pxbase;
   }
 
   // Debug output (apenas para primeiros pixels)
   static int debugCount = 0;
   if (debugCount < 10) {
-    Serial.print("  #677 pxbase=1: (");
+    Serial.print("  #680 pxbase=8: (");
     Serial.print(x);
     Serial.print(",");
     Serial.print(y);
@@ -1441,7 +1441,7 @@ void testSequentialFill677() {
     Serial.println("╠═══════════════════════════════════════════════════════╣");
     Serial.println("║  Preenche pixel a pixel com delay para visualizar     ║");
     Serial.println("║  a estrutura de mapeamento criada pela fórmula #677   ║");
-    Serial.println("║  Config: 64x8, pxbase=1                               ║");
+    Serial.println("║  Config: 64x8, pxbase=8 (formula #680)                ║");
     Serial.println("║                                                       ║");
     Serial.println("║  Delay: ~50ms por pixel (ajustável)                   ║");
     Serial.println("║  Cores alternadas por linha para melhor visualização  ║");
