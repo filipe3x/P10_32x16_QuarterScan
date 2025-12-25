@@ -92,56 +92,75 @@ void drawPixelRaw(int16_t x, int16_t y, uint16_t color) {
 }
 
 // ============ NOVA FORMULA PROPOSTA (baseada em dados RAW) ============
-// Esta função implementa a descoberta de que:
-// - O hardware só tem 16 endereços X únicos (não 32)
-// - A seleção de bloco de 8 colunas é codificada no endereço Y
-// - Blocos 0,2 usam row offset 0; Blocos 1,3 usam row offset +4
 //
-// IMPORTANTE: NÃO usar remapY aqui! Os dados RAW mostram o mapeamento direto.
+// DESCOBERTAS CRÍTICAS:
+// 1. O hardware faz physical_row = (driver_Y % 4) + row_offset
+// 2. Blocos 0,2 (X 0-7, 16-23): row_offset = 0 → só acedem a linhas físicas 0-3
+// 3. Blocos 1,3 (X 8-15, 24-31): row_offset = 4 → só acedem a linhas físicas 4-7
+// 4. Driver Y=0 e Y=4 produzem a MESMA linha física!
+//
+// IMPLICAÇÃO: Cada linha lógica está ESPALHADA por duas linhas físicas!
+// - Colunas 0-15 (via blocos 0,2) estão nas linhas físicas 0-3
+// - Colunas 16-31 (via blocos 1,3) estão nas linhas físicas 4-7
+//
+// NOVA ABORDAGEM: Aceitar a arquitetura intercalada do painel
 
 void drawPixelNewFormula(int16_t x, int16_t y, uint16_t color) {
   if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
 
-  int block = x / 8;                    // 0, 1, 2, ou 3
-  int localX = x % 8;                   // 0-7 dentro do bloco
+  // Determinar metade esquerda/direita e posição dentro
+  bool rightHalf = (x >= 16);  // Metade direita do painel
+  int halfX = x % 16;          // 0-15 dentro de cada metade
+  int blockInHalf = halfX / 8; // 0 ou 1 dentro da metade
+  int pixelInBlock = halfX % 8; // 0-7 dentro do bloco
 
-  // Blocos 0,1 usam X físico 0-7; Blocos 2,3 usam X físico 8-15
-  int physX = (block < 2) ? localX : (localX + 8);
+  // Metade superior/inferior do painel
+  bool bottomPanel = (y >= 8);
+  int localY = y % 8;  // 0-7 dentro de cada metade vertical
 
-  // O hardware adiciona +4 às linhas para blocos 1,3
-  // Para compensar, precisamos de ajustar o Y que enviamos
-  int rowOffset = (block % 2 == 0) ? 0 : 4;
+  int driverX, driverY;
 
-  int physY;
+  if (!rightHalf) {
+    // METADE ESQUERDA (X 0-15): usar blocos 0,2
+    // Estes blocos dão linhas físicas 0-3 (via driver_Y % 4)
+    driverX = (blockInHalf == 0) ? pixelInBlock : (pixelInBlock + 16);
 
-  // Metade superior (y 0-7) ou inferior (y 8-15)?
-  bool bottomHalf = (y >= 8);
-  int localY = y % 8;  // 0-7 dentro da metade
-
-  if (rowOffset == 0) {
-    // Blocos 0, 2: mapeamento direto
-    physY = localY;
-  } else {
-    // Blocos 1, 3: hardware adiciona +4 automaticamente
-    // Para obter linha física 0-3, precisamos enviar Y negativo (impossível!)
-    // Solução: usar linhas 4-7 para Y lógico 0-3, e linhas 0-3 para Y lógico 4-7
-    if (localY >= 4) {
-      // Y lógico 4-7: enviar Y-4, hardware adiciona +4, resultado = Y
-      physY = localY - 4;
+    // Para Y lógico 0-3: queremos linha física 0-3 → driverY = 0-3
+    // Para Y lógico 4-7: queremos linha física 4-7, MAS blocos 0,2 só dão 0-3!
+    //   Solução: trocar para blocos 1,3 (ver else abaixo)
+    if (localY < 4) {
+      driverY = localY;  // 0-3 → linha física 0-3 ✓
     } else {
-      // Y lógico 0-3: enviar Y+4, hardware adiciona +4, resultado = Y+8
-      // MAS isso vai para a zona errada! Precisamos de outra abordagem...
-      // Tentar usar a zona R2 (linhas 8-15) que mapeia de volta para 0-3
-      physY = localY + 4;
+      // Y 4-7: blocos 0,2 dariam linha física 0-3 (errado!)
+      // Precisamos usar blocos 1,3 que dão linha física 4-7
+      // Isso significa mudar o driverX para o range dos blocos 1,3
+      driverX = (blockInHalf == 0) ? (pixelInBlock + 8) : (pixelInBlock + 24);
+      driverY = localY - 4;  // 0-3 → hardware adiciona +4 → linha física 4-7 ✓
+    }
+  } else {
+    // METADE DIREITA (X 16-31): usar blocos 1,3
+    // Estes blocos dão linhas físicas 4-7 (via (driver_Y % 4) + 4)
+    driverX = (blockInHalf == 0) ? (pixelInBlock + 8) : (pixelInBlock + 24);
+
+    // Para Y lógico 4-7: queremos linha física 4-7 → driverY = 0-3, hardware +4 = 4-7 ✓
+    // Para Y lógico 0-3: queremos linha física 0-3, MAS blocos 1,3 só dão 4-7!
+    //   Solução: trocar para blocos 0,2
+    if (localY >= 4) {
+      driverY = localY - 4;  // 0-3 → hardware +4 → linha física 4-7 ✓
+    } else {
+      // Y 0-3: blocos 1,3 dariam linha física 4-7 (errado!)
+      // Precisamos usar blocos 0,2 que dão linha física 0-3
+      driverX = (blockInHalf == 0) ? pixelInBlock : (pixelInBlock + 16);
+      driverY = localY;  // 0-3 → linha física 0-3 ✓
     }
   }
 
-  // Adicionar offset para metade inferior
-  if (bottomHalf) {
-    physY += 8;
+  // Adicionar offset para metade inferior do painel
+  if (bottomPanel) {
+    driverY += 8;
   }
 
-  dma_display->drawPixel(physX, physY, color);
+  dma_display->drawPixel(driverX, driverY, color);
 }
 
 // ============ CORES ============
@@ -922,27 +941,35 @@ void testPixelByPixelNewFormula() {
   clearScreen();
   drawPixelNewFormula(x, y, GREEN);
 
-  // Calcular valores da nova formula para debug
-  int block = x / 8;
-  int localX = x % 8;
-  int physX = (block < 2) ? localX : (localX + 8);
-  int rowOffset = (block % 2 == 0) ? 0 : 4;
-  bool bottomHalf = (y >= 8);
+  // Calcular valores da nova formula v3 para debug
+  bool rightHalf = (x >= 16);
+  int halfX = x % 16;
+  int blockInHalf = halfX / 8;
+  int pixelInBlock = halfX % 8;
+  bool bottomPanel = (y >= 8);
   int localY = y % 8;
-  int physY;
+  int driverX, driverY;
 
-  if (rowOffset == 0) {
-    physY = localY;
-  } else {
-    if (localY >= 4) {
-      physY = localY - 4;
+  if (!rightHalf) {
+    driverX = (blockInHalf == 0) ? pixelInBlock : (pixelInBlock + 16);
+    if (localY < 4) {
+      driverY = localY;
     } else {
-      physY = localY + 4;
+      driverX = (blockInHalf == 0) ? (pixelInBlock + 8) : (pixelInBlock + 24);
+      driverY = localY - 4;
+    }
+  } else {
+    driverX = (blockInHalf == 0) ? (pixelInBlock + 8) : (pixelInBlock + 24);
+    if (localY >= 4) {
+      driverY = localY - 4;
+    } else {
+      driverX = (blockInHalf == 0) ? pixelInBlock : (pixelInBlock + 16);
+      driverY = localY;
     }
   }
-  if (bottomHalf) physY += 8;
+  if (bottomPanel) driverY += 8;
 
-  Serial.print("\n[NOVA FORMULA v2] Pixel ");
+  Serial.print("\n[NOVA FORMULA v3] Pixel ");
   Serial.print(currentStep + 1);
   Serial.print("/");
   Serial.println(totalPixels);
@@ -951,19 +978,17 @@ void testPixelByPixelNewFormula() {
   Serial.print(", ");
   Serial.print(y);
   Serial.print(") -> Driver: (");
-  Serial.print(physX);
+  Serial.print(driverX);
   Serial.print(", ");
-  Serial.print(physY);
+  Serial.print(driverY);
   Serial.println(")");
-  Serial.print("  Block=");
-  Serial.print(block);
+  Serial.print("  rightHalf=");
+  Serial.print(rightHalf ? "sim" : "nao");
   Serial.print(", localY=");
   Serial.print(localY);
-  Serial.print(", rowOffset=");
-  Serial.print(rowOffset);
-  Serial.print(", bottomHalf=");
-  Serial.println(bottomHalf ? "sim" : "nao");
-  Serial.println("  -> OBSERVE: Aparece UM pixel ou DOIS? Linha correta?");
+  Serial.print(", bottomPanel=");
+  Serial.println(bottomPanel ? "sim" : "nao");
+  Serial.println("  -> OBSERVE: Pixel na posicao CORRETA? Sem duplicacao?");
 
   waitForNext();
 }
