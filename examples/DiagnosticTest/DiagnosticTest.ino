@@ -96,6 +96,8 @@ void drawPixelRaw(int16_t x, int16_t y, uint16_t color) {
 // - O hardware só tem 16 endereços X únicos (não 32)
 // - A seleção de bloco de 8 colunas é codificada no endereço Y
 // - Blocos 0,2 usam row offset 0; Blocos 1,3 usam row offset +4
+//
+// IMPORTANTE: NÃO usar remapY aqui! Os dados RAW mostram o mapeamento direto.
 
 void drawPixelNewFormula(int16_t x, int16_t y, uint16_t color) {
   if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
@@ -106,17 +108,38 @@ void drawPixelNewFormula(int16_t x, int16_t y, uint16_t color) {
   // Blocos 0,1 usam X físico 0-7; Blocos 2,3 usam X físico 8-15
   int physX = (block < 2) ? localX : (localX + 8);
 
-  // Blocos 0,2 usam row offset 0; Blocos 1,3 usam row offset +4
+  // O hardware adiciona +4 às linhas para blocos 1,3
+  // Para compensar, precisamos de ajustar o Y que enviamos
   int rowOffset = (block % 2 == 0) ? 0 : 4;
 
-  // Aplicar remapY existente (troca de blocos de 4 linhas)
-  int baseY = remapY(y);
+  int physY;
 
-  // Adicionar offset de bloco
-  int physY = baseY + rowOffset;
+  // Metade superior (y 0-7) ou inferior (y 8-15)?
+  bool bottomHalf = (y >= 8);
+  int localY = y % 8;  // 0-7 dentro da metade
 
-  // Seleção de metade superior/inferior
-  if (y >= 8) physY += 8;
+  if (rowOffset == 0) {
+    // Blocos 0, 2: mapeamento direto
+    physY = localY;
+  } else {
+    // Blocos 1, 3: hardware adiciona +4 automaticamente
+    // Para obter linha física 0-3, precisamos enviar Y negativo (impossível!)
+    // Solução: usar linhas 4-7 para Y lógico 0-3, e linhas 0-3 para Y lógico 4-7
+    if (localY >= 4) {
+      // Y lógico 4-7: enviar Y-4, hardware adiciona +4, resultado = Y
+      physY = localY - 4;
+    } else {
+      // Y lógico 0-3: enviar Y+4, hardware adiciona +4, resultado = Y+8
+      // MAS isso vai para a zona errada! Precisamos de outra abordagem...
+      // Tentar usar a zona R2 (linhas 8-15) que mapeia de volta para 0-3
+      physY = localY + 4;
+    }
+  }
+
+  // Adicionar offset para metade inferior
+  if (bottomHalf) {
+    physY += 8;
+  }
 
   dma_display->drawPixel(physX, physY, color);
 }
@@ -904,11 +927,22 @@ void testPixelByPixelNewFormula() {
   int localX = x % 8;
   int physX = (block < 2) ? localX : (localX + 8);
   int rowOffset = (block % 2 == 0) ? 0 : 4;
-  int baseY = remapY(y);
-  int physY = baseY + rowOffset;
-  if (y >= 8) physY += 8;
+  bool bottomHalf = (y >= 8);
+  int localY = y % 8;
+  int physY;
 
-  Serial.print("\n[NOVA FORMULA] Pixel ");
+  if (rowOffset == 0) {
+    physY = localY;
+  } else {
+    if (localY >= 4) {
+      physY = localY - 4;
+    } else {
+      physY = localY + 4;
+    }
+  }
+  if (bottomHalf) physY += 8;
+
+  Serial.print("\n[NOVA FORMULA v2] Pixel ");
   Serial.print(currentStep + 1);
   Serial.print("/");
   Serial.println(totalPixels);
@@ -916,18 +950,20 @@ void testPixelByPixelNewFormula() {
   Serial.print(x);
   Serial.print(", ");
   Serial.print(y);
-  Serial.print(") -> Fisico: (");
+  Serial.print(") -> Driver: (");
   Serial.print(physX);
   Serial.print(", ");
   Serial.print(physY);
   Serial.println(")");
   Serial.print("  Block=");
   Serial.print(block);
-  Serial.print(", localX=");
-  Serial.print(localX);
+  Serial.print(", localY=");
+  Serial.print(localY);
   Serial.print(", rowOffset=");
-  Serial.println(rowOffset);
-  Serial.println("  -> OBSERVE: Aparece UM pixel ou DOIS? Posicao correta?");
+  Serial.print(rowOffset);
+  Serial.print(", bottomHalf=");
+  Serial.println(bottomHalf ? "sim" : "nao");
+  Serial.println("  -> OBSERVE: Aparece UM pixel ou DOIS? Linha correta?");
 
   waitForNext();
 }
