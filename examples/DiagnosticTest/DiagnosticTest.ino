@@ -285,38 +285,36 @@ bool reinitDisplay32x16() {
 // Entrada: coordenadas lógicas 32x16
 // Saída: desenha no display 64x8 com mapeamento correto
 //
-// ANÁLISE DOS DADOS DO UTILIZADOR:
-// Driver (16, 0) → Physical (9, 1)   - offset X de +8 em relação ao esperado
-// Driver (24, 0) → Physical (9, 5)   - salto de linha a cada 8 pixels
-//
-// HIPÓTESE: A fórmula original está invertida!
-// - Quando y&4 == 0: NÃO adicionar offset (para primeiros blocos)
-// - Quando y&4 != 0: Adicionar offset (para blocos alternados)
+// SOLUÇÃO FINAL DA ISSUE #677:
+// O dono da biblioteca sugeriu: "try the last code, but set pixel base 1"
+// Com pxbase=1, a fórmula duplica o X:
+// - y&4 == 0: driverX = x + (x+1) = 2x + 1
+// - y&4 != 0: driverX = x + x = 2x
 //
 void drawPixelFormula677(int16_t x, int16_t y, uint16_t color) {
   if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
 
-  // Fórmula CORRIGIDA (invertida em relação à #677 original)
-  uint8_t pxbase = 16;
+  // Fórmula #677 com pxbase = 1 (solução final!)
+  uint8_t pxbase = 1;
   int16_t driverX = x;
   int16_t driverY = y;
 
   // Transformação Y: comprime 16 linhas em 8, alternando blocos de 4
   driverY = ((y >> 3) * 4) + (y & 0b00000011);
 
-  // Transformação X - INVERTIDA em relação à #677 original!
+  // Transformação X com pxbase = 1 (duplica o X)
   if ((y & 4) == 0) {
-    // Linhas 0-3 e 8-11: SEM offset extra (era COM offset na #677)
-    driverX = x + ((x / pxbase) * pxbase);
+    // Linhas 0-3 e 8-11: driverX = x + (x+1) = 2x + 1
+    driverX = x + ((x / pxbase) + 1) * pxbase;
   } else {
-    // Linhas 4-7 e 12-15: COM offset (era SEM na #677)
-    driverX = x + (((x / pxbase) + 1) * pxbase);
+    // Linhas 4-7 e 12-15: driverX = x + x = 2x
+    driverX = x + (x / pxbase) * pxbase;
   }
 
   // Debug output (apenas para primeiros pixels)
   static int debugCount = 0;
   if (debugCount < 10) {
-    Serial.print("  CORRIGIDA: (");
+    Serial.print("  #677 pxbase=1: (");
     Serial.print(x);
     Serial.print(",");
     Serial.print(y);
@@ -1146,21 +1144,21 @@ void testPixelByPixelNewFormula() {
   // Usar a fórmula #677 para config 64x8
   drawPixelFormula677(x, y, GREEN);
 
-  // Calcular valores para debug (fórmula CORRIGIDA - invertida)
-  uint8_t pxbase = 16;
+  // Calcular valores para debug (fórmula #677 com pxbase=1)
+  uint8_t pxbase = 1;
   int16_t driverX = x;
   int16_t driverY = ((y >> 3) * 4) + (y & 0b00000011);
 
-  // Fórmula INVERTIDA em relação à #677 original!
+  // Fórmula #677 com pxbase=1 (duplica o X)
   if ((y & 4) == 0) {
-    // Linhas 0-3 e 8-11: SEM offset extra
-    driverX = x + ((x / pxbase) * pxbase);
+    // Linhas 0-3 e 8-11: driverX = 2x + 1
+    driverX = x + ((x / pxbase) + 1) * pxbase;
   } else {
-    // Linhas 4-7 e 12-15: COM offset
-    driverX = x + (((x / pxbase) + 1) * pxbase);
+    // Linhas 4-7 e 12-15: driverX = 2x
+    driverX = x + (x / pxbase) * pxbase;
   }
 
-  Serial.print("\n[FORMULA CORRIGIDA - 64x8] Pixel ");
+  Serial.print("\n[#677 pxbase=1 - 64x8] Pixel ");
   Serial.print(currentStep + 1);
   Serial.print("/");
   Serial.println(totalPixels);
@@ -1173,14 +1171,13 @@ void testPixelByPixelNewFormula() {
   Serial.print(", ");
   Serial.print(driverY);
   Serial.println(")");
-  Serial.print("  pxbase=16, (y&4)=");
+  Serial.print("  pxbase=1: y&4=");
   Serial.print(y & 4);
-  Serial.print(", (y>>3)=");
-  Serial.print(y >> 3);
-  Serial.print(", (y&3)=");
-  Serial.println(y & 3);
+  Serial.print(" => driverX=");
+  Serial.print((y & 4) == 0 ? "2x+1" : "2x");
+  Serial.print("=");
+  Serial.println(driverX);
   Serial.println("  -> OBSERVE: Pixel na posicao CORRETA? SEM duplicacao?");
-  Serial.println("     Esperado para (0,0): Physical (1,1) ou proximo");
 
   waitForNext();
 }
