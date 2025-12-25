@@ -429,6 +429,7 @@ void showMenu() {
   Serial.println("╠═══════════════════════════════════════════════════════╣");
   Serial.println("║ 20 - Teste R1/R2: esquerda vs direita?                ║");
   Serial.println("║ 21 - Teste ghost: onde aparece o duplicado?           ║");
+  Serial.println("║ 22 - Preenchimento sequencial #677 (visualizacao)     ║");
   Serial.println("╚═══════════════════════════════════════════════════════╝");
   Serial.println("\nDigite o numero do teste:");
 }
@@ -1426,6 +1427,94 @@ void testGhostMapping() {
   waitForNext();
 }
 
+// ============ TESTE #22: VISUALIZACAO SEQUENCIAL (estilo issue #677) ============
+//
+// Baseado no código de teste da issue #677:
+// Preenche pixel a pixel com delay para visualizar a estrutura de mapeamento
+// Usa configuração 64x8 e fórmula #677 com pxbase=1
+//
+void testSequentialFill677() {
+  // Na primeira iteração, reinicializar como 64x8
+  if (currentStep == 0 && !is64x8Mode) {
+    Serial.println("\n╔═══════════════════════════════════════════════════════╗");
+    Serial.println("║  TESTE 22: PREENCHIMENTO SEQUENCIAL (estilo #677)     ║");
+    Serial.println("╠═══════════════════════════════════════════════════════╣");
+    Serial.println("║  Preenche pixel a pixel com delay para visualizar     ║");
+    Serial.println("║  a estrutura de mapeamento criada pela fórmula #677   ║");
+    Serial.println("║  Config: 64x8, pxbase=1                               ║");
+    Serial.println("║                                                       ║");
+    Serial.println("║  Delay: ~50ms por pixel (ajustável)                   ║");
+    Serial.println("║  Cores alternadas por linha para melhor visualização  ║");
+    Serial.println("╚═══════════════════════════════════════════════════════╝");
+
+    if (!reinitDisplay64x8()) {
+      Serial.println("ERRO: Não foi possível reinicializar como 64x8!");
+      currentMode = 0;
+      return;
+    }
+    delay(500);
+  }
+
+  // Passos: 0=preencher, 1=aguardar, 2=limpar, 3=voltar ao menu
+  if (currentStep == 0) {
+    Serial.println("\n[SEQUENCIAL #677] Iniciando preenchimento...");
+    Serial.println("  OBSERVE: A sequência de acendimento dos pixels");
+    Serial.println("  revela a estrutura física do mapeamento!\n");
+
+    // Preencher sequencialmente como no código #677
+    for (int y = 0; y < 16; y++) {
+      // Cor alternada por linha para melhor visualização
+      uint16_t lineColor;
+      switch (y % 4) {
+        case 0: lineColor = dma_display->color565(255, 0, 0); break;   // Vermelho
+        case 1: lineColor = dma_display->color565(0, 255, 0); break;   // Verde
+        case 2: lineColor = dma_display->color565(0, 0, 255); break;   // Azul
+        case 3: lineColor = dma_display->color565(255, 255, 0); break; // Amarelo
+      }
+
+      Serial.print("  Linha Y=");
+      Serial.print(y);
+      Serial.print(" (");
+      switch (y % 4) {
+        case 0: Serial.print("vermelho"); break;
+        case 1: Serial.print("verde"); break;
+        case 2: Serial.print("azul"); break;
+        case 3: Serial.print("amarelo"); break;
+      }
+      Serial.println(")");
+
+      for (int x = 0; x < 32; x++) {
+        drawPixelFormula677(x, y, lineColor);
+        delay(50);  // 50ms por pixel para visualização mais clara
+      }
+    }
+
+    Serial.println("\n>>> Preenchimento completo!");
+    Serial.println(">>> OBSERVE a estrutura final do painel");
+    Serial.println(">>> Pressione 'n' para limpar e repetir, 'q' para sair");
+
+    currentStep = 1;
+    waitForNext();
+
+  } else if (currentStep == 1) {
+    // Aguardar 2 segundos mostrando resultado, depois limpar
+    Serial.println("\n[SEQUENCIAL #677] Limpando tela em 2 segundos...");
+    delay(2000);
+    dma_display->clearScreen();
+
+    Serial.println("\n>>> Tela limpa. Repetir teste? (n=sim, q=menu)");
+    currentStep = 0;  // Permite repetir
+    waitForNext();
+
+  }
+
+  // Se saiu do loop waitForNext com currentMode=0, restaurar display
+  if (currentMode == 0) {
+    Serial.println("\n>>> Restaurando display para 32x16...");
+    reinitDisplay32x16();
+  }
+}
+
 // ============ SETUP ============
 
 void setup() {
@@ -1482,9 +1571,9 @@ void setup() {
 // ============ LOOP ============
 
 void loop() {
-  // Restaurar display para 32x16 se saímos do modo 16 prematuramente
-  if (is64x8Mode && currentMode != 16) {
-    Serial.println("\n>>> Display em modo 64x8 fora do teste 16 - restaurando para 32x16...");
+  // Restaurar display para 32x16 se saímos dos modos 64x8 prematuramente
+  if (is64x8Mode && currentMode != 16 && currentMode != 22) {
+    Serial.println("\n>>> Display em modo 64x8 fora dos testes 16/22 - restaurando para 32x16...");
     reinitDisplay32x16();
     showMenu();
   }
@@ -1496,7 +1585,7 @@ void loop() {
       input.trim();
       int mode = input.toInt();
 
-      if (mode >= 1 && mode <= 21) {
+      if (mode >= 1 && mode <= 22) {
         currentMode = mode;
         currentStep = 0;
         Serial.print("\nIniciando teste ");
@@ -1534,6 +1623,7 @@ void loop() {
     // Testes de diagnostico
     case 20: testR1R2LeftRight(); break;
     case 21: testGhostMapping(); break;
+    case 22: testSequentialFill677(); break;
     default:
       currentMode = 0;
       showMenu();
