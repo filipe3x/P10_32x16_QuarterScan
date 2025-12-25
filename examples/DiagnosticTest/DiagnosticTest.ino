@@ -179,6 +179,9 @@ void drawPixelNewFormula(int16_t x, int16_t y, uint16_t color) {
 
 bool is64x8Mode = false;  // Flag para indicar se estamos em modo 64x8
 
+// Cores (declaradas aqui para serem acessíveis nas funções de reinit)
+uint16_t RED, GREEN, BLUE, WHITE, YELLOW, CYAN, MAGENTA;
+
 // Pinos guardados para reinicialização
 HUB75_I2S_CFG::i2s_pins stored_pins;
 
@@ -327,9 +330,6 @@ void resetDebugCount() {
   // Mas podemos imprimir separador
   Serial.println("\n--- Novo teste ---");
 }
-
-// ============ CORES ============
-uint16_t RED, GREEN, BLUE, WHITE, YELLOW, CYAN, MAGENTA;
 
 // ============ VARIÁVEIS GLOBAIS ============
 int currentMode = 0;
