@@ -13,7 +13,17 @@ Esta biblioteca fornece um wrapper para a biblioteca `ESP32-HUB75-MatrixPanel-I2
 - **Tipo:** SMD3535
 - **Scan:** 1/4 (Constant Current)
 - **Interface:** HUB75
-- **Controladores:** Compatível com Huidu, Novastar, Colorlight, Linsn
+- **Chips:** SM16208SJ, DP74HC138B, MW245B, MW4953F
+
+## ✅ Problema Resolvido
+
+Painéis P10 1/4 scan têm um problema de **duplicação de pixels** quando usados com a biblioteca base:
+- Cada pixel aparece duplicado com offset de +16 colunas
+- Texto e gráficos aparecem "espelhados" ou ilegíveis
+
+**Solução implementada** (baseada na [Issue #680](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/issues/680)):
+- Configurar o driver como **64x8** (não 32x16!)
+- Aplicar fórmula de mapeamento #680 com `pxbase=8`
 
 ## 📦 Instalação
 
@@ -27,7 +37,7 @@ Esta biblioteca fornece um wrapper para a biblioteca `ESP32-HUB75-MatrixPanel-I2
 ```ini
 lib_deps =
     https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA
-    https://github.com/seuuser/P10_32x16_QuarterScan
+    https://github.com/filipe3x/P10_32x16_QuarterScan
 ```
 
 ## 🔌 Pinout
@@ -49,6 +59,7 @@ lib_deps =
 ```
 
 ## 🚀 Uso Básico
+
 ```cpp
 #include <P10_32x16_QuarterScan.h>
 
@@ -60,22 +71,23 @@ HUB75_I2S_CFG::i2s_pins _pins = {
   LAT_PIN, OE_PIN, CLK_PIN
 };
 
-// Configuração do display base
-HUB75_I2S_CFG mxconfig(32, 16, 1, _pins);
+// ⚠️ IMPORTANTE: Configurar como 64x8, NÃO 32x16!
+HUB75_I2S_CFG mxconfig(64, 8, 1, _pins);
 mxconfig.clkphase = false;
+mxconfig.driver = HUB75_I2S_CFG::SHIFTREG;
 
 // Criar display base
 MatrixPanel_I2S_DMA *dma_display = new MatrixPanel_I2S_DMA(mxconfig);
 dma_display->setBrightness8(100);
 dma_display->begin();
 
-// Criar wrapper P10
+// Criar wrapper P10 (interface lógica 32x16)
 P10_32x16_QuarterScan *display = new P10_32x16_QuarterScan(dma_display);
 
-// Usar o display!
+// Usar o display normalmente!
 display->fillScreen(display->color565(255, 0, 0)); // Vermelho
 display->drawPixel(10, 5, display->color565(0, 255, 0)); // Pixel verde
-display->drawLine(0, 0, 31, 15, display->color565(0, 0, 255)); // Linha azul
+display->print("Hello!"); // Texto funciona!
 ```
 
 ## 📚 API
@@ -93,7 +105,7 @@ display->drawLine(0, 0, 31, 15, display->color565(0, 0, 255)); // Linha azul
 
 - `color565(r, g, b)` - Converte RGB (0-255) para RGB565
 
-### Texto
+### Texto (via Adafruit_GFX)
 
 - `setCursor(x, y)` - Define posição do cursor
 - `setTextColor(color)` - Define cor do texto
@@ -106,58 +118,67 @@ display->drawLine(0, 0, 31, 15, display->color565(0, 0, 255)); // Linha azul
 - `width()` - Retorna largura (32)
 - `height()` - Retorna altura (16)
 
-## 🔧 Exemplos
-
-### Exemplo 1: Teste Simples
-```cpp
-void loop() {
-  // Linha vermelha no topo
-  display->clearScreen();
-  display->drawLine(0, 0, 31, 0, display->color565(255, 0, 0));
-  delay(1000);
-  
-  // Linha verde no meio
-  display->clearScreen();
-  display->drawLine(0, 8, 31, 8, display->color565(0, 255, 0));
-  delay(1000);
-  
-  // Linha azul no fundo
-  display->clearScreen();
-  display->drawLine(0, 15, 31, 15, display->color565(0, 0, 255));
-  delay(1000);
-}
-```
-
-### Exemplo 2: Gradiente
-```cpp
-void loop() {
-  for(int y = 0; y < 16; y++) {
-    uint8_t brightness = map(y, 0, 15, 0, 255);
-    for(int x = 0; x < 32; x++) {
-      display->drawPixel(x, y, display->color565(brightness, 0, 0));
-    }
-  }
-  delay(5000);
-}
-```
-
 ## ⚙️ Detalhes Técnicos
 
-### Problema Resolvido
+### Arquitetura da Solução
 
-Painéis P10 outdoor 32x16 com scan 1/4 têm um mapeamento especial:
-- As linhas físicas não correspondem diretamente às linhas lógicas
-- Há um swap de blocos de 4 linhas
-- As linhas 0-7 usam R1/G1/B1
-- As linhas 8-15 usam R2/G2/B2
-- O eixo X também requer remapeamento
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    P10_32x16_QuarterScan                    │
+│                  (Interface lógica: 32x16)                  │
+├─────────────────────────────────────────────────────────────┤
+│                    Fórmula #680                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ driverY = ((y >> 3) * 4) + (y & 0b11)                 │  │
+│  │                                                        │  │
+│  │ if (y & 4) == 0:                                      │  │
+│  │     driverX = x + (x / 8) * 8                         │  │
+│  │ else:                                                  │  │
+│  │     driverX = x + ((x / 8) + 1) * 8                   │  │
+│  └───────────────────────────────────────────────────────┘  │
+├─────────────────────────────────────────────────────────────┤
+│              MatrixPanel_I2S_DMA (64x8)                     │
+├─────────────────────────────────────────────────────────────┤
+│                   Hardware P10 1/4 Scan                     │
+└─────────────────────────────────────────────────────────────┘
+```
 
-Esta biblioteca corrige automaticamente todo o mapeamento.
+### Tabela de Mapeamento X
 
-## 🐛 Limitações Conhecidas
+| X lógico | y&4==0 (linhas 0-3, 8-11) | y&4!=0 (linhas 4-7, 12-15) |
+|----------|---------------------------|----------------------------|
+| 0-7      | 0-7                       | 8-15                       |
+| 8-15     | 16-23                     | 24-31                      |
+| 16-23    | 32-39                     | 40-47                      |
+| 24-31    | 48-55                     | 56-63                      |
 
-- Texto só funciona corretamente nas linhas 0-7 (limitação da biblioteca base)
-- Para texto nas linhas 8-15, use `drawPixel()` para desenhar caracteres manualmente
+### Tabela de Mapeamento Y
+
+| Y lógico | driverY |
+|----------|---------|
+| 0-3      | 0-3     |
+| 4-7      | 0-3     |
+| 8-11     | 4-7     |
+| 12-15    | 4-7     |
+
+### Por que 64x8?
+
+O painel P10 1/4 scan tem uma arquitetura de shift registers que causa duplicação com offset de +16 colunas. Ao configurar o driver como 64x8:
+- Obtemos 64 endereços de coluna únicos
+- A fórmula #680 distribui os pixels corretamente
+- Eliminamos a duplicação "fantasma"
+
+## 🔧 Exemplos
+
+Ver pasta `examples/` para exemplos completos:
+- `SimpleTest/` - Testes básicos de linha, retângulo e texto
+- `DiagnosticTest/` - Script de diagnóstico interativo
+
+## 🙏 Créditos
+
+- Biblioteca base: [ESP32-HUB75-MatrixPanel-DMA](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA) por mrfaptastic
+- Solução #680: [Issue #680](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/issues/680)
+- Discussão original: [Discussion #622](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/discussions/622)
 
 ## 📝 Licença
 
@@ -167,12 +188,6 @@ MIT License - Livre para uso comercial e pessoal
 
 Desenvolvido por Filipe Marques em Dezembro 2025
 
-## 🙏 Créditos
-
-- Biblioteca base: [ESP32-HUB75-MatrixPanel-DMA](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA) por mrfaptastic
-- Inspirado em discussões da comunidade sobre painéis P10 1/4 scan
-
 ## 📞 Suporte
 
-- Issues: https://github.com/seuuser/P10_32x16_QuarterScan/issues
-- Discussões: https://github.com/seuuser/P10_32x16_QuarterScan/discussions
+- Issues: https://github.com/filipe3x/P10_32x16_QuarterScan/issues

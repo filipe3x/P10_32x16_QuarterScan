@@ -1,30 +1,27 @@
 /*
- * DiagnosticTest.ino - Teste de Diagnóstico Cirúrgico para P10 32x16
+ * DiagnosticTest.ino - Teste de Diagnóstico para P10 32x16
  *
- * Script interativo para descobrir o mapeamento correto do painel.
- * Avança cada teste com 'n' na consola serial.
+ * Script interativo para testar e diagnosticar painéis P10 1/4 scan.
+ * Usa a solução #680: configuração 64x8 com fórmula pxbase=8.
+ *
+ * ARQUITECTURA:
+ * - Display base: MatrixPanel_I2S_DMA configurado como 64x8
+ * - Wrapper: P10_32x16_QuarterScan expõe interface lógica 32x16
+ * - Testes RAW: acesso direto ao driver para comparação
  *
  * MODOS DE TESTE:
- * 1 - Pixel a pixel (32x16 = 512 testes)
- * 2 - Linha a linha horizontal (16 linhas)
- * 3 - Coluna a coluna vertical (32 colunas)
- * 4 - Caracteres assimétricos ('1', 'F', 'G', '7')
- * 5 - Modo RAW (sem wrapper, direto no baseDisplay)
- * 6 - Teste comparativo (wrapper vs raw, lado a lado)
- * 7 - Quadrantes (divide painel em 4 partes)
- * 8 - Scan de Y fixo (todas as colunas de uma linha)
- * 9 - Scan de X fixo (todas as linhas de uma coluna)
+ * 1-15: Testes com WRAPPER (biblioteca P10_32x16_QuarterScan)
+ * 16-19: Testes com fórmula #680 directa
+ * 20-22: Testes de diagnóstico (RAW, ghost mapping, etc.)
  *
  * COMANDOS SERIAL:
  * 'n' - próximo teste
  * 'p' - teste anterior
- * 's' - pular para modo específico
- * 'r' - repetir teste atual
+ * 'r' - repetir teste actual
  * 'q' - voltar ao menu
  */
 
-#include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include <Adafruit_GFX.h>
+#include <P10_32x16_QuarterScan.h>
 
 // Pinout para ESP32
 #define R1_PIN 25
@@ -43,50 +40,19 @@
 #define CLK_PIN 16
 
 MatrixPanel_I2S_DMA *dma_display = nullptr;
+P10_32x16_QuarterScan *display = nullptr;  // Wrapper com fórmula #680
 
-// ============ FUNÇÕES DE REMAPEAMENTO ATUAIS ============
-// (copiadas da biblioteca para teste e modificação)
+// ============ FUNÇÕES DE DESENHO ============
 
-int16_t remapY(int16_t y) {
-  int lineInHalf = y % 8;
-  int quad = (lineInHalf / 4) % 2;
-  int posInQuad = lineInHalf % 4;
-
-  if (quad == 0) {
-    return posInQuad + 4;
-  } else {
-    return posInQuad;
-  }
-}
-
-int16_t remapX(int16_t x, int16_t mappedY) {
-  uint8_t pxbase = 8;
-  int16_t result;
-
-  if ((mappedY & 4) == 0) {
-    result = (x / pxbase) * pxbase + pxbase + 7 - (x & 0x7);
-  } else {
-    result = x + (x / pxbase) * pxbase;
-  }
-
-  return result % 32;
-}
-
-// Desenha pixel COM wrapper/remap
+// Desenha pixel COM wrapper (usa biblioteca P10_32x16_QuarterScan)
 void drawPixelWrapped(int16_t x, int16_t y, uint16_t color) {
-  if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
-
-  int16_t mappedY = remapY(y);
-  int16_t mappedX = remapX(x, mappedY);
-
-  if (y < 8) {
-    dma_display->drawPixel(mappedX, mappedY, color);
-  } else {
-    dma_display->drawPixel(mappedX, mappedY + 8, color);
+  if (display != nullptr) {
+    display->drawPixel(x, y, color);
   }
 }
 
-// Desenha pixel SEM wrapper (raw/direto)
+// Desenha pixel SEM wrapper (raw/direto no driver 64x8)
+// NOTA: Com config 64x8, coordenadas vão de 0-63 em X e 0-7 em Y
 void drawPixelRaw(int16_t x, int16_t y, uint16_t color) {
   dma_display->drawPixel(x, y, color);
 }
@@ -163,8 +129,200 @@ void drawPixelNewFormula(int16_t x, int16_t y, uint16_t color) {
   dma_display->drawPixel(driverX, driverY, color);
 }
 
-// ============ CORES ============
+// ============ FORMULA #677 COM CONFIG 64x8 ============
+//
+// BASEADO NA ISSUE #677:
+// https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/issues/677
+//
+// CONCEITO: Configurar o driver como 64x8 (dobro da largura, metade da altura)
+// Isso dá 64 endereços de coluna únicos, eliminando a duplicação +16
+//
+// FÓRMULA:
+// - pxbase = 16
+// - Se (y & 4) == 0: x += ((x / pxbase) + 1) * pxbase
+// - Se (y & 4) != 0: x += (x / pxbase) * pxbase
+// - y = (y >> 3) * 4 + (y & 0b11)
+
+bool is64x8Mode = false;  // Flag para indicar se estamos em modo 64x8
+
+// Cores (declaradas aqui para serem acessíveis nas funções de reinit)
 uint16_t RED, GREEN, BLUE, WHITE, YELLOW, CYAN, MAGENTA;
+
+// Pinos guardados para reinicialização
+HUB75_I2S_CFG::i2s_pins stored_pins;
+
+void initPins() {
+  stored_pins.r1 = R1_PIN;
+  stored_pins.g1 = G1_PIN;
+  stored_pins.b1 = B1_PIN;
+  stored_pins.r2 = R2_PIN;
+  stored_pins.g2 = G2_PIN;
+  stored_pins.b2 = B2_PIN;
+  stored_pins.a = A_PIN;
+  stored_pins.b = B_PIN;
+  stored_pins.c = C_PIN;
+  stored_pins.d = D_PIN;
+  stored_pins.e = E_PIN;
+  stored_pins.lat = LAT_PIN;
+  stored_pins.oe = OE_PIN;
+  stored_pins.clk = CLK_PIN;
+}
+
+// Reinicializa o display com configuração 64x8 (para fórmula #677)
+bool reinitDisplay64x8() {
+  Serial.println("\n>>> Reinicializando display como 64x8...");
+
+  // Libertar display anterior
+  if (dma_display != nullptr) {
+    delete dma_display;
+    dma_display = nullptr;
+  }
+
+  delay(100);
+
+  // Nova configuração: 64x8
+  HUB75_I2S_CFG mxconfig(64, 8, 1, stored_pins);
+  mxconfig.clkphase = false;
+  mxconfig.driver = HUB75_I2S_CFG::SHIFTREG;
+
+  dma_display = new MatrixPanel_I2S_DMA(mxconfig);
+  dma_display->setBrightness8(128);
+
+  if (!dma_display->begin()) {
+    Serial.println("ERRO: Falhou reinicialização 64x8!");
+    return false;
+  }
+
+  dma_display->clearScreen();
+  is64x8Mode = true;
+
+  // Redefinir cores
+  RED = dma_display->color565(255, 0, 0);
+  GREEN = dma_display->color565(0, 255, 0);
+  BLUE = dma_display->color565(0, 0, 255);
+  WHITE = dma_display->color565(255, 255, 255);
+  YELLOW = dma_display->color565(255, 255, 0);
+  CYAN = dma_display->color565(0, 255, 255);
+  MAGENTA = dma_display->color565(255, 0, 255);
+
+  Serial.println(">>> Display reinicializado como 64x8 com sucesso!");
+  return true;
+}
+
+// Reinicializa o display com configuração padrão 32x16
+bool reinitDisplay32x16() {
+  Serial.println("\n>>> Reinicializando display como 32x16...");
+
+  if (dma_display != nullptr) {
+    delete dma_display;
+    dma_display = nullptr;
+  }
+
+  delay(100);
+
+  HUB75_I2S_CFG mxconfig(32, 16, 1, stored_pins);
+  mxconfig.clkphase = false;
+  mxconfig.driver = HUB75_I2S_CFG::SHIFTREG;
+
+  dma_display = new MatrixPanel_I2S_DMA(mxconfig);
+  dma_display->setBrightness8(128);
+
+  if (!dma_display->begin()) {
+    Serial.println("ERRO: Falhou reinicialização 32x16!");
+    return false;
+  }
+
+  dma_display->clearScreen();
+  is64x8Mode = false;
+
+  RED = dma_display->color565(255, 0, 0);
+  GREEN = dma_display->color565(0, 255, 0);
+  BLUE = dma_display->color565(0, 0, 255);
+  WHITE = dma_display->color565(255, 255, 255);
+  YELLOW = dma_display->color565(255, 255, 0);
+  CYAN = dma_display->color565(0, 255, 255);
+  MAGENTA = dma_display->color565(255, 0, 255);
+
+  Serial.println(">>> Display reinicializado como 32x16 com sucesso!");
+  return true;
+}
+
+// Fórmula #680 para config 64x8
+// Entrada: coordenadas lógicas 32x16
+// Saída: desenha no display 64x8 com mapeamento correto
+//
+// SOLUÇÃO DA ISSUE #680:
+// pxbase=8 com lógica INVERTIDA corrige ordem das linhas (1-2-3-4)
+// - y&4 == 0: driverX = x + (x/8)*8
+// - y&4 != 0: driverX = x + ((x/8)+1)*8
+//
+void drawPixelFormula677(int16_t x, int16_t y, uint16_t color) {
+  if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
+
+  // Fórmula #680 - pxbase=8 com lógica INVERTIDA vs #677
+  // Isto corrige a ordem das linhas (1-2-3-4 em vez de 2-1-4-3)
+  uint8_t pxbase = 8;
+  int16_t driverX = x;
+  int16_t driverY = y;
+
+  // Transformação Y: comprime 16 linhas em 8, alternando blocos de 4
+  driverY = ((y >> 3) * 4) + (y & 0b00000011);
+
+  // Transformação X com pxbase = 8 (LÓGICA INVERTIDA vs #677!)
+  if ((y & 4) == 0) {
+    // Linhas 0-3 e 8-11: x += (x/8)*8
+    driverX = x + (x / pxbase) * pxbase;
+  } else {
+    // Linhas 4-7 e 12-15: x += ((x/8)+1)*8
+    driverX = x + ((x / pxbase) + 1) * pxbase;
+  }
+
+  // Debug output (apenas para primeiros pixels)
+  static int debugCount = 0;
+  if (debugCount < 10) {
+    Serial.print("  #680 pxbase=8: (");
+    Serial.print(x);
+    Serial.print(",");
+    Serial.print(y);
+    Serial.print(") -> driver(");
+    Serial.print(driverX);
+    Serial.print(",");
+    Serial.print(driverY);
+    Serial.println(")");
+    debugCount++;
+  }
+
+  dma_display->drawPixel(driverX, driverY, color);
+}
+
+// Reset do contador de debug
+void resetDebugCount() {
+  // Variável estática em drawPixelFormula677 - não podemos resetar diretamente
+  // Mas podemos imprimir separador
+  Serial.println("\n--- Novo teste ---");
+}
+
+// ============ DEBUG HELPERS - Fórmula #680 ============
+// Estas funções extraem as transformações X/Y da fórmula #680
+// para uso em debug output (mostrar mapeamento sem desenhar)
+
+// Transforma Y lógico (0-15) para Y do driver (0-7)
+int16_t mapY_680(int16_t y) {
+  return ((y >> 3) * 4) + (y & 0b00000011);
+}
+
+// Transforma X lógico (0-31) para X do driver (0-63)
+// Precisa de Y lógico para determinar o offset correto
+int16_t mapX_680(int16_t x, int16_t y) {
+  const uint8_t pxbase = 8;
+  if ((y & 4) == 0) {
+    // Linhas 0-3 e 8-11
+    return x + (x / pxbase) * pxbase;
+  } else {
+    // Linhas 4-7 e 12-15
+    return x + ((x / pxbase) + 1) * pxbase;
+  }
+}
 
 // ============ VARIÁVEIS GLOBAIS ============
 int currentMode = 0;
@@ -210,18 +368,18 @@ void printCoords(const char* prefix, int16_t x, int16_t y) {
 }
 
 void printMapping(int16_t logX, int16_t logY) {
-  int16_t mappedY = remapY(logY);
-  int16_t mappedX = remapX(logX, mappedY);
-  int16_t finalY = (logY < 8) ? mappedY : mappedY + 8;
+  // Usa fórmula #680 para mostrar mapeamento
+  int16_t driverY = mapY_680(logY);
+  int16_t driverX = mapX_680(logX, logY);
 
   Serial.print("  Logico: (");
   Serial.print(logX);
   Serial.print(", ");
   Serial.print(logY);
-  Serial.print(") -> Fisico: (");
-  Serial.print(mappedX);
+  Serial.print(") -> Driver: (");
+  Serial.print(driverX);
   Serial.print(", ");
-  Serial.print(finalY);
+  Serial.print(driverY);
   Serial.println(")");
 }
 
@@ -230,32 +388,38 @@ void printMapping(int16_t logX, int16_t logY) {
 void showMenu() {
   Serial.println("\n");
   Serial.println("╔═══════════════════════════════════════════════════════╗");
-  Serial.println("║   P10 32x16 - DIAGNOSTICO CIRURGICO DO PAINEL         ║");
+  Serial.println("║   P10 32x16 - DIAGNOSTICO (Solução #680 Activa)       ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║        >>> TESTES COM BIBLIOTECA (32x16) <<<          ║");
   Serial.println("╠═══════════════════════════════════════════════════════╣");
   Serial.println("║  1 - Pixel a pixel (WRAPPER) - 32x16 pixels           ║");
-  Serial.println("║  2 - Pixel a pixel (RAW) - sem remapeamento           ║");
   Serial.println("║  3 - Linhas horizontais (WRAPPER)                     ║");
-  Serial.println("║  4 - Linhas horizontais (RAW)                         ║");
   Serial.println("║  5 - Colunas verticais (WRAPPER)                      ║");
-  Serial.println("║  6 - Colunas verticais (RAW)                          ║");
   Serial.println("║  7 - Caracteres asimetricos (WRAPPER)                 ║");
-  Serial.println("║  8 - Caracteres asimetricos (RAW)                     ║");
-  Serial.println("║  9 - Comparacao lado-a-lado (pixel)                   ║");
   Serial.println("║ 10 - Quadrantes coloridos (WRAPPER)                   ║");
-  Serial.println("║ 11 - Quadrantes coloridos (RAW)                       ║");
   Serial.println("║ 12 - Teste de Y fixo (todas X de uma linha)           ║");
   Serial.println("║ 13 - Teste de X fixo (todas Y de uma coluna)          ║");
   Serial.println("║ 14 - Grid 8x8 marcadores                              ║");
   Serial.println("║ 15 - Preencher tela inteira (teste basico)            ║");
   Serial.println("╠═══════════════════════════════════════════════════════╣");
-  Serial.println("║        >>> NOVA FORMULA (baseada em RAW data) <<<     ║");
+  Serial.println("║        >>> TESTES RAW (driver 64x8 direto) <<<        ║");
   Serial.println("╠═══════════════════════════════════════════════════════╣");
-  Serial.println("║ 16 - Pixel a pixel (NOVA FORMULA)                     ║");
-  Serial.println("║ 17 - Linhas horizontais (NOVA FORMULA)                ║");
-  Serial.println("║ 18 - Quadrantes coloridos (NOVA FORMULA)              ║");
-  Serial.println("║ 19 - Preencher tela (NOVA FORMULA)                    ║");
+  Serial.println("║  2 - Pixel a pixel (RAW 64x8) - sem remapeamento      ║");
+  Serial.println("║  4 - Linhas horizontais (RAW 64x8)                    ║");
+  Serial.println("║  6 - Colunas verticais (RAW 64x8)                     ║");
+  Serial.println("║  8 - Caracteres asimetricos (RAW 64x8)                ║");
+  Serial.println("║  9 - Comparacao lado-a-lado (wrapper vs raw)          ║");
+  Serial.println("║ 11 - Quadrantes coloridos (RAW 64x8)                  ║");
   Serial.println("╠═══════════════════════════════════════════════════════╣");
-  Serial.println("║            >>> TESTES DE DIAGNOSTICO <<<              ║");
+  Serial.println("║        >>> TESTES FORMULA #680 DIRECTA <<<            ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║ 16 - Pixel a pixel (formula #680 step-by-step)        ║");
+  Serial.println("║ 17 - Linhas horizontais (formula directa)             ║");
+  Serial.println("║ 18 - Quadrantes coloridos (formula directa)           ║");
+  Serial.println("║ 19 - Preencher tela (formula directa)                 ║");
+  Serial.println("║ 22 - Preenchimento sequencial (visualizacao)          ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║        >>> TESTES DE DIAGNOSTICO <<<                  ║");
   Serial.println("╠═══════════════════════════════════════════════════════╣");
   Serial.println("║ 20 - Teste R1/R2: esquerda vs direita?                ║");
   Serial.println("║ 21 - Teste ghost: onde aparece o duplicado?           ║");
@@ -291,9 +455,10 @@ void testPixelByPixelWrapped() {
   waitForNext();
 }
 
-// Teste 2: Pixel a pixel RAW (sem wrapper)
+// Teste 2: Pixel a pixel RAW (sem wrapper) - coordenadas 64x8!
 void testPixelByPixelRaw() {
-  int totalPixels = 32 * 16;
+  // Com config 64x8, temos 64*8=512 pixels no driver
+  int totalPixels = 64 * 8;
   if (currentStep >= totalPixels) {
     Serial.println("\n=== TESTE COMPLETO ===");
     currentMode = 0;
@@ -301,21 +466,22 @@ void testPixelByPixelRaw() {
     return;
   }
 
-  int x = currentStep % 32;
-  int y = currentStep / 32;
+  int x = currentStep % 64;  // 0-63 (driver 64x8)
+  int y = currentStep / 64;  // 0-7 (driver 64x8)
 
   clearScreen();
   drawPixelRaw(x, y, YELLOW);
 
-  Serial.print("\n[RAW] Pixel ");
+  Serial.print("\n[RAW 64x8] Pixel ");
   Serial.print(currentStep + 1);
   Serial.print("/");
   Serial.print(totalPixels);
-  Serial.print("  Coordenada: (");
+  Serial.print("  Driver coord: (");
   Serial.print(x);
   Serial.print(", ");
   Serial.print(y);
   Serial.println(")");
+  Serial.println("  NOTA: Driver configurado como 64x8, não 32x16!");
   Serial.println("  -> OBSERVE: Onde aparece o pixel amarelo no painel?");
 
   waitForNext();
@@ -337,18 +503,19 @@ void testHorizontalLinesWrapped() {
 
   Serial.print("\n[WRAPPER] Linha horizontal Y=");
   Serial.println(currentStep);
-  Serial.print("  Mapeamento Y: ");
+  Serial.print("  Mapeamento Y (#680): ");
   Serial.print(currentStep);
-  Serial.print(" -> ");
-  Serial.println(remapY(currentStep));
+  Serial.print(" -> driverY=");
+  Serial.println(mapY_680(currentStep));
   Serial.println("  -> OBSERVE: Onde aparece a linha verde?");
 
   waitForNext();
 }
 
-// Teste 4: Linhas horizontais RAW
+// Teste 4: Linhas horizontais RAW (64x8)
 void testHorizontalLinesRaw() {
-  if (currentStep >= 16) {
+  // Com config 64x8, temos apenas 8 linhas no driver
+  if (currentStep >= 8) {
     Serial.println("\n=== TESTE COMPLETO ===");
     currentMode = 0;
     currentStep = 0;
@@ -356,13 +523,15 @@ void testHorizontalLinesRaw() {
   }
 
   clearScreen();
-  for (int x = 0; x < 32; x++) {
+  // Desenhar linha completa (64 pixels de largura)
+  for (int x = 0; x < 64; x++) {
     drawPixelRaw(x, currentStep, CYAN);
   }
 
-  Serial.print("\n[RAW] Linha horizontal Y=");
+  Serial.print("\n[RAW 64x8] Linha horizontal Y=");
   Serial.println(currentStep);
-  Serial.println("  -> OBSERVE: Onde aparece a linha ciano?");
+  Serial.println("  NOTA: Driver 64x8 - linhas 0-7 apenas");
+  Serial.println("  -> OBSERVE: Quantas linhas físicas acendem?");
 
   waitForNext();
 }
@@ -385,26 +554,27 @@ void testVerticalColumnsWrapped() {
   Serial.println(currentStep);
   Serial.println("  -> OBSERVE: Onde aparece a coluna vermelha?");
 
-  // Mostrar mapeamento detalhado
-  Serial.println("  Mapeamento X para cada Y:");
+  // Mostrar mapeamento detalhado (#680)
+  Serial.println("  Mapeamento X (#680) para cada Y:");
   for (int y = 0; y < 16; y++) {
-    int16_t my = remapY(y);
-    int16_t mx = remapX(currentStep, my);
+    int16_t driverY = mapY_680(y);
+    int16_t driverX = mapX_680(currentStep, y);
     Serial.print("    Y=");
     Serial.print(y);
-    Serial.print(" -> (");
-    Serial.print(mx);
+    Serial.print(" -> driver(");
+    Serial.print(driverX);
     Serial.print(", ");
-    Serial.print(y < 8 ? my : my + 8);
+    Serial.print(driverY);
     Serial.println(")");
   }
 
   waitForNext();
 }
 
-// Teste 6: Colunas verticais RAW
+// Teste 6: Colunas verticais RAW (64x8)
 void testVerticalColumnsRaw() {
-  if (currentStep >= 32) {
+  // Com config 64x8, temos 64 colunas no driver
+  if (currentStep >= 64) {
     Serial.println("\n=== TESTE COMPLETO ===");
     currentMode = 0;
     currentStep = 0;
@@ -412,12 +582,14 @@ void testVerticalColumnsRaw() {
   }
 
   clearScreen();
-  for (int y = 0; y < 16; y++) {
+  // Desenhar coluna (8 pixels de altura)
+  for (int y = 0; y < 8; y++) {
     drawPixelRaw(currentStep, y, MAGENTA);
   }
 
-  Serial.print("\n[RAW] Coluna vertical X=");
+  Serial.print("\n[RAW 64x8] Coluna vertical X=");
   Serial.println(currentStep);
+  Serial.println("  NOTA: Driver 64x8 - colunas 0-63");
   Serial.println("  -> OBSERVE: Onde aparece a coluna magenta?");
 
   waitForNext();
@@ -714,8 +886,9 @@ void testQuadrantsWrapped() {
   waitForNext();
 }
 
-// Teste 11: Quadrantes coloridos RAW
+// Teste 11: Quadrantes coloridos RAW (64x8)
 void testQuadrantsRaw() {
+  // Com 64x8, dividimos em 4 quadrantes: 32x4 cada
   if (currentStep >= 4) {
     Serial.println("\n=== TESTE COMPLETO ===");
     currentMode = 0;
@@ -725,8 +898,11 @@ void testQuadrantsRaw() {
 
   clearScreen();
 
-  int startX = (currentStep % 2) * 16;
-  int startY = (currentStep / 2) * 8;
+  // Quadrantes no espaço 64x8:
+  // Q0: X=0-31, Y=0-3   Q1: X=32-63, Y=0-3
+  // Q2: X=0-31, Y=4-7   Q3: X=32-63, Y=4-7
+  int startX = (currentStep % 2) * 32;
+  int startY = (currentStep / 2) * 4;
   uint16_t color;
   const char* colorName;
 
@@ -737,25 +913,26 @@ void testQuadrantsRaw() {
     case 3: color = YELLOW; colorName = "AMARELO"; break;
   }
 
-  for (int y = startY; y < startY + 8; y++) {
-    for (int x = startX; x < startX + 16; x++) {
+  for (int y = startY; y < startY + 4; y++) {
+    for (int x = startX; x < startX + 32; x++) {
       drawPixelRaw(x, y, color);
     }
   }
 
-  Serial.print("\n[RAW] Quadrante ");
+  Serial.print("\n[RAW 64x8] Quadrante ");
   Serial.print(currentStep + 1);
   Serial.print("/4 - ");
   Serial.println(colorName);
-  Serial.print("  Area: X=");
+  Serial.print("  Area driver: X=");
   Serial.print(startX);
   Serial.print("-");
-  Serial.print(startX + 15);
+  Serial.print(startX + 31);
   Serial.print(", Y=");
   Serial.print(startY);
   Serial.print("-");
-  Serial.println(startY + 7);
-  Serial.println("  -> OBSERVE: O quadrante aparece na posicao correta?");
+  Serial.println(startY + 3);
+  Serial.println("  NOTA: Driver 64x8 - quadrantes 32x4 cada");
+  Serial.println("  -> OBSERVE: Que parte do painel físico acende?");
 
   waitForNext();
 }
@@ -785,10 +962,10 @@ void testFixedY() {
   Serial.print(currentStep);
   Serial.println(" com todos os X (0-31)");
   Serial.println("  Cores: X[0-7]=Vermelho, X[8-15]=Amarelo, X[16-23]=Ciano, X[24-31]=Azul");
-  Serial.print("  remapY(");
+  Serial.print("  mapY_680(");
   Serial.print(currentStep);
   Serial.print(") = ");
-  Serial.println(remapY(currentStep));
+  Serial.println(mapY_680(currentStep));
   Serial.println("  -> OBSERVE: A linha esta continua? Cores na ordem certa?");
 
   waitForNext();
@@ -930,11 +1107,37 @@ void testFillScreen() {
 
 // ============ TESTES NOVA FORMULA ============
 
-// Teste 16: Pixel a pixel com NOVA FORMULA
+// Teste 16: Pixel a pixel com FORMULA #677 (config 64x8)
+// NOTA: Este teste reinicializa o display como 64x8!
 void testPixelByPixelNewFormula() {
+  // Na primeira iteração, reinicializar como 64x8
+  // Usa is64x8Mode (global) em vez de static local para detectar se precisa reinit
+  if (currentStep == 0 && !is64x8Mode) {
+    Serial.println("\n╔═══════════════════════════════════════════════════════╗");
+    Serial.println("║  TESTE 16: FORMULA #677 COM CONFIGURACAO 64x8         ║");
+    Serial.println("║  Baseado em: github.com/.../issues/677                ║");
+    Serial.println("╠═══════════════════════════════════════════════════════╣");
+    Serial.println("║  CONCEITO: Usar mxconfig(64, 8, 1) em vez de 32x16    ║");
+    Serial.println("║  Isso dá 64 endereços de coluna ÚNICOS no driver      ║");
+    Serial.println("║  A fórmula #677 mapeia 32x16 lógico → 64x8 físico     ║");
+    Serial.println("╚═══════════════════════════════════════════════════════╝");
+
+    if (!reinitDisplay64x8()) {
+      Serial.println("ERRO: Não foi possível reinicializar como 64x8!");
+      currentMode = 0;
+      return;
+    }
+    delay(500);
+  }
+
   int totalPixels = 32 * 16;
   if (currentStep >= totalPixels) {
     Serial.println("\n=== TESTE COMPLETO ===");
+    Serial.println(">>> Restaurando display para 32x16...");
+
+    // Restaurar configuração original (is64x8Mode é resetado em reinitDisplay32x16)
+    reinitDisplay32x16();
+
     currentMode = 0;
     currentStep = 0;
     return;
@@ -944,9 +1147,52 @@ void testPixelByPixelNewFormula() {
   int y = currentStep / 32;
 
   clearScreen();
-  drawPixelNewFormula(x, y, GREEN);
 
-  // Calcular valores da nova formula v3 para debug
+  // Usar a fórmula #677 para config 64x8
+  drawPixelFormula677(x, y, GREEN);
+
+  // Calcular valores para debug (fórmula #677 com pxbase=1)
+  uint8_t pxbase = 1;
+  int16_t driverX = x;
+  int16_t driverY = ((y >> 3) * 4) + (y & 0b00000011);
+
+  // Fórmula #677 com pxbase=1 (duplica o X)
+  if ((y & 4) == 0) {
+    // Linhas 0-3 e 8-11: driverX = 2x + 1
+    driverX = x + ((x / pxbase) + 1) * pxbase;
+  } else {
+    // Linhas 4-7 e 12-15: driverX = 2x
+    driverX = x + (x / pxbase) * pxbase;
+  }
+
+  Serial.print("\n[#677 pxbase=1 - 64x8] Pixel ");
+  Serial.print(currentStep + 1);
+  Serial.print("/");
+  Serial.println(totalPixels);
+  Serial.print("  Logico (32x16): (");
+  Serial.print(x);
+  Serial.print(", ");
+  Serial.print(y);
+  Serial.print(") -> Driver (64x8): (");
+  Serial.print(driverX);
+  Serial.print(", ");
+  Serial.print(driverY);
+  Serial.println(")");
+  Serial.print("  pxbase=1: y&4=");
+  Serial.print(y & 4);
+  Serial.print(" => driverX=");
+  Serial.print((y & 4) == 0 ? "2x+1" : "2x");
+  Serial.print("=");
+  Serial.println(driverX);
+  Serial.println("  -> OBSERVE: Pixel na posicao CORRETA? SEM duplicacao?");
+
+  waitForNext();
+}
+
+// Guarda a fórmula antiga para comparação (renomeada)
+void drawPixelOldFormula(int16_t x, int16_t y, uint16_t color) {
+  if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
+
   bool rightHalf = (x >= 16);
   int halfX = x % 16;
   int blockInHalf = halfX / 8;
@@ -974,28 +1220,7 @@ void testPixelByPixelNewFormula() {
   }
   if (bottomPanel) driverY += 8;
 
-  Serial.print("\n[NOVA FORMULA v3] Pixel ");
-  Serial.print(currentStep + 1);
-  Serial.print("/");
-  Serial.println(totalPixels);
-  Serial.print("  Logico: (");
-  Serial.print(x);
-  Serial.print(", ");
-  Serial.print(y);
-  Serial.print(") -> Driver: (");
-  Serial.print(driverX);
-  Serial.print(", ");
-  Serial.print(driverY);
-  Serial.println(")");
-  Serial.print("  rightHalf=");
-  Serial.print(rightHalf ? "sim" : "nao");
-  Serial.print(", localY=");
-  Serial.print(localY);
-  Serial.print(", bottomPanel=");
-  Serial.println(bottomPanel ? "sim" : "nao");
-  Serial.println("  -> OBSERVE: Pixel na posicao CORRETA? Sem duplicacao?");
-
-  waitForNext();
+  dma_display->drawPixel(driverX, driverY, color);
 }
 
 // Teste 17: Linhas horizontais com NOVA FORMULA
@@ -1208,6 +1433,94 @@ void testGhostMapping() {
   waitForNext();
 }
 
+// ============ TESTE #22: VISUALIZACAO SEQUENCIAL (estilo issue #677) ============
+//
+// Baseado no código de teste da issue #677:
+// Preenche pixel a pixel com delay para visualizar a estrutura de mapeamento
+// Usa configuração 64x8 e fórmula #677 com pxbase=1
+//
+void testSequentialFill677() {
+  // Na primeira iteração, reinicializar como 64x8
+  if (currentStep == 0 && !is64x8Mode) {
+    Serial.println("\n╔═══════════════════════════════════════════════════════╗");
+    Serial.println("║  TESTE 22: PREENCHIMENTO SEQUENCIAL (estilo #677)     ║");
+    Serial.println("╠═══════════════════════════════════════════════════════╣");
+    Serial.println("║  Preenche pixel a pixel com delay para visualizar     ║");
+    Serial.println("║  a estrutura de mapeamento criada pela fórmula #677   ║");
+    Serial.println("║  Config: 64x8, pxbase=8 (formula #680)                ║");
+    Serial.println("║                                                       ║");
+    Serial.println("║  Delay: ~50ms por pixel (ajustável)                   ║");
+    Serial.println("║  Cores alternadas por linha para melhor visualização  ║");
+    Serial.println("╚═══════════════════════════════════════════════════════╝");
+
+    if (!reinitDisplay64x8()) {
+      Serial.println("ERRO: Não foi possível reinicializar como 64x8!");
+      currentMode = 0;
+      return;
+    }
+    delay(500);
+  }
+
+  // Passos: 0=preencher, 1=aguardar, 2=limpar, 3=voltar ao menu
+  if (currentStep == 0) {
+    Serial.println("\n[SEQUENCIAL #677] Iniciando preenchimento...");
+    Serial.println("  OBSERVE: A sequência de acendimento dos pixels");
+    Serial.println("  revela a estrutura física do mapeamento!\n");
+
+    // Preencher sequencialmente como no código #677
+    for (int y = 0; y < 16; y++) {
+      // Cor alternada por linha para melhor visualização
+      uint16_t lineColor;
+      switch (y % 4) {
+        case 0: lineColor = dma_display->color565(255, 0, 0); break;   // Vermelho
+        case 1: lineColor = dma_display->color565(0, 255, 0); break;   // Verde
+        case 2: lineColor = dma_display->color565(0, 0, 255); break;   // Azul
+        case 3: lineColor = dma_display->color565(255, 255, 0); break; // Amarelo
+      }
+
+      Serial.print("  Linha Y=");
+      Serial.print(y);
+      Serial.print(" (");
+      switch (y % 4) {
+        case 0: Serial.print("vermelho"); break;
+        case 1: Serial.print("verde"); break;
+        case 2: Serial.print("azul"); break;
+        case 3: Serial.print("amarelo"); break;
+      }
+      Serial.println(")");
+
+      for (int x = 0; x < 32; x++) {
+        drawPixelFormula677(x, y, lineColor);
+        delay(50);  // 50ms por pixel para visualização mais clara
+      }
+    }
+
+    Serial.println("\n>>> Preenchimento completo!");
+    Serial.println(">>> OBSERVE a estrutura final do painel");
+    Serial.println(">>> Pressione 'n' para limpar e repetir, 'q' para sair");
+
+    currentStep = 1;
+    waitForNext();
+
+  } else if (currentStep == 1) {
+    // Aguardar 2 segundos mostrando resultado, depois limpar
+    Serial.println("\n[SEQUENCIAL #677] Limpando tela em 2 segundos...");
+    delay(2000);
+    dma_display->clearScreen();
+
+    Serial.println("\n>>> Tela limpa. Repetir teste? (n=sim, q=menu)");
+    currentStep = 0;  // Permite repetir
+    waitForNext();
+
+  }
+
+  // Se saiu do loop waitForNext com currentMode=0, restaurar display
+  if (currentMode == 0) {
+    Serial.println("\n>>> Restaurando display para 32x16...");
+    reinitDisplay32x16();
+  }
+}
+
 // ============ SETUP ============
 
 void setup() {
@@ -1216,8 +1529,13 @@ void setup() {
 
   Serial.println("\n\n");
   Serial.println("╔═══════════════════════════════════════════════════════╗");
-  Serial.println("║     P10 32x16 DIAGNOSTIC TEST - INICIALIZANDO...      ║");
+  Serial.println("║     P10 32x16 DIAGNOSTIC TEST - SOLUÇÃO #680          ║");
+  Serial.println("╠═══════════════════════════════════════════════════════╣");
+  Serial.println("║  Config: 64x8 base + wrapper 32x16 lógico             ║");
   Serial.println("╚═══════════════════════════════════════════════════════╝");
+
+  // Guardar pinos para reinicialização posterior
+  initPins();
 
   // Configurar pinos HUB75
   HUB75_I2S_CFG::i2s_pins _pins = {
@@ -1227,12 +1545,17 @@ void setup() {
     LAT_PIN, OE_PIN, CLK_PIN
   };
 
-  // Configuração do display
-  HUB75_I2S_CFG mxconfig(32, 16, 1, _pins);
+  // ============================================================
+  // CONFIGURAÇÃO #680: 64x8 (NÃO 32x16!)
+  // ============================================================
+  // Esta é a solução para eliminar duplicação de pixels.
+  // O wrapper P10_32x16_QuarterScan expõe interface 32x16.
+  // ============================================================
+  HUB75_I2S_CFG mxconfig(64, 8, 1, _pins);
   mxconfig.clkphase = false;
-  mxconfig.driver = HUB75_I2S_CFG::SHIFTREG; // Driver padrão
+  mxconfig.driver = HUB75_I2S_CFG::SHIFTREG;
 
-  // Inicializar display
+  // Inicializar display base (64x8)
   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
   dma_display->setBrightness8(128);
 
@@ -1240,6 +1563,10 @@ void setup() {
     Serial.println("ERRO FATAL: Display nao inicializou!");
     while(1) delay(1000);
   }
+
+  // Criar wrapper P10_32x16_QuarterScan (interface 32x16)
+  display = new P10_32x16_QuarterScan(dma_display);
+  is64x8Mode = true;  // Estamos em modo 64x8 por defeito
 
   // Definir cores
   RED = dma_display->color565(255, 0, 0);
@@ -1253,7 +1580,8 @@ void setup() {
   clearScreen();
 
   Serial.println("\nDisplay inicializado com sucesso!");
-  Serial.println("Dimensoes: 32x16 pixels");
+  Serial.println("Driver: 64x8 | Wrapper: 32x16 logico");
+  Serial.println("Solucao #680 activa - sem duplicacao de pixels!");
 
   showMenu();
 }
@@ -1261,6 +1589,9 @@ void setup() {
 // ============ LOOP ============
 
 void loop() {
+  // NOTA: Agora iniciamos em 64x8 por defeito (solução #680)
+  // Não há necessidade de restaurar para 32x16
+
   // Se não há modo selecionado, aguarda input do menu
   if (currentMode == 0) {
     if (Serial.available()) {
@@ -1268,7 +1599,7 @@ void loop() {
       input.trim();
       int mode = input.toInt();
 
-      if (mode >= 1 && mode <= 21) {
+      if (mode >= 1 && mode <= 22) {
         currentMode = mode;
         currentStep = 0;
         Serial.print("\nIniciando teste ");
@@ -1306,6 +1637,7 @@ void loop() {
     // Testes de diagnostico
     case 20: testR1R2LeftRight(); break;
     case 21: testGhostMapping(); break;
+    case 22: testSequentialFill677(); break;
     default:
       currentMode = 0;
       showMenu();

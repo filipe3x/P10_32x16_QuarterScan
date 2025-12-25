@@ -27,149 +27,137 @@ lib_deps =
 ## Architecture
 
 ```
-P10_32x16_QuarterScan : Adafruit_GFX
-        │
-        └──> MatrixPanel_I2S_DMA (base display, passed to constructor)
+┌─────────────────────────────────────────────────────────────┐
+│                    P10_32x16_QuarterScan                    │
+│                  (Interface lógica: 32x16)                  │
+│                  Herda de Adafruit_GFX                      │
+├─────────────────────────────────────────────────────────────┤
+│                    Fórmula #680                             │
+│         Mapeia coordenadas 32x16 → 64x8                     │
+├─────────────────────────────────────────────────────────────┤
+│              MatrixPanel_I2S_DMA (64x8)                     │
+│         ⚠️ DEVE ser configurado como 64x8!                  │
+├─────────────────────────────────────────────────────────────┤
+│                   Hardware P10 1/4 Scan                     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 - **Inheritance pattern:** Extends `Adafruit_GFX` to inherit all text/drawing functions. Only overrides `drawPixel()` - all GFX operations (text, lines, shapes) work automatically by delegating to `drawPixel()`.
 - **Wrapper pattern:** Takes initialized `MatrixPanel_I2S_DMA*` in constructor, doesn't own it.
 
-## 1/4 Scan Remapping (Critical Implementation Detail)
+## ✅ SOLUÇÃO IMPLEMENTADA (Issue #680)
 
-The panel's physical pixel layout doesn't match logical coordinates. Two remapping functions handle this:
+### O Problema Original
 
-**`remapY(y)`** - Swaps 4-line blocks within each half:
-- Lines 0-3 ↔ Lines 4-7 (for both top and bottom halves)
-- Uses modulo arithmetic to swap quad positions
+Painéis P10 1/4 scan com configuração 32x16 apresentavam:
+- Duplicação de pixels com offset +16 colunas
+- Texto e gráficos ilegíveis/espelhados
+- Cada `drawPixel()` acendia 2 pixels físicos
 
-**`remapX(x, mappedY)`** - Adjusts X based on remapped Y:
-- For lines 0-3 (after remap): mirrors within 8-pixel blocks
-- For lines 4-7: interleaves with offset
+### A Causa Raiz
 
-**Display split:** Y < 8 uses R1/G1/B1 pins; Y >= 8 uses R2/G2/B2 pins (standard HUB75 behavior)
+O hardware de shift registers do painel 1/4 scan só tem 16 endereços de coluna únicos por linha de scan. Com configuração 32x16:
+- Driver envia dados para 32 colunas
+- Hardware replica colunas 0-15 nas colunas 16-31
+- Resultado: duplicação "fantasma"
+
+### A Solução (#680)
+
+1. **Configurar driver como 64x8** (não 32x16!)
+   ```cpp
+   HUB75_I2S_CFG mxconfig(64, 8, 1, _pins);
+   ```
+   - Isto dá 64 endereços de coluna únicos
+   - Elimina a duplicação
+
+2. **Fórmula de mapeamento #680** com `pxbase=8`:
+   ```cpp
+   // Transformação Y
+   driverY = ((y >> 3) * 4) + (y & 0b11);
+
+   // Transformação X
+   if ((y & 4) == 0) {
+       driverX = x + (x / 8) * 8;      // Linhas 0-3, 8-11
+   } else {
+       driverX = x + ((x / 8) + 1) * 8; // Linhas 4-7, 12-15
+   }
+   ```
+
+### Tabelas de Mapeamento
+
+**Mapeamento X (pxbase=8):**
+
+| X lógico | y&4==0 (linhas 0-3, 8-11) | y&4!=0 (linhas 4-7, 12-15) |
+|----------|---------------------------|----------------------------|
+| 0-7      | 0-7                       | 8-15                       |
+| 8-15     | 16-23                     | 24-31                      |
+| 16-23    | 32-39                     | 40-47                      |
+| 24-31    | 48-55                     | 56-63                      |
+
+**Mapeamento Y:**
+
+| Y lógico | driverY |
+|----------|---------|
+| 0-3      | 0-3     |
+| 4-7      | 0-3     |
+| 8-11     | 4-7     |
+| 12-15    | 4-7     |
 
 ## File Structure
 
-- `src/P10_32x16_QuarterScan.h` - Header with class definition
-- `src/P10_32x16_QuarterScan.cpp` - Implementation with remapping logic
-- `examples/SimpleTest/` - Basic usage example
+- `src/P10_32x16_QuarterScan.h` - Header com definição da classe
+- `src/P10_32x16_QuarterScan.cpp` - Implementação com fórmula #680
+- `examples/SimpleTest/` - Exemplo básico (usa config 64x8)
+- `examples/DiagnosticTest/` - Script de diagnóstico interativo
+- `docs/current_behaviour.md` - Documentação detalhada do problema e solução
 - `library.properties` - Arduino library metadata
 
 ## Hardware Specifications
 
 - **Panel:** P10-O4S-SMD3535 32×16 outdoor (1/4 scan, constant current)
+- **Chips:** SM16208SJ, DP74HC138B, MW245B, MW4953F
 - **Microcontroller:** ESP32
 - **Interface:** HUB75
 
-## Critical Problem Identified
+## Código de Inicialização Correto
 
-### Original Library (ESP32-HUB75-MatrixPanel-I2S-DMA)
+```cpp
+#include <P10_32x16_QuarterScan.h>
 
-**Problem:** Does not work directly with P10 outdoor 1/4 scan panels.
+HUB75_I2S_CFG::i2s_pins _pins = { ... };
 
-**Why?**
+// ⚠️ CRÍTICO: 64x8, NÃO 32x16!
+HUB75_I2S_CFG mxconfig(64, 8, 1, _pins);
+mxconfig.clkphase = false;
+mxconfig.driver = HUB75_I2S_CFG::SHIFTREG;
 
-1. **Non-linear coordinate mapping:** P10 1/4 scan panels have special architecture:
-   - Physical lines 0-7 use R1/G1/B1
-   - Physical lines 8-15 use R2/G2/B2
-   - There is swap of 4-line blocks within each half
-   - X axis requires special remapping (inversion within 8-pixel blocks)
+MatrixPanel_I2S_DMA *dma_display = new MatrixPanel_I2S_DMA(mxconfig);
+dma_display->begin();
 
-2. **Inadequate default configuration:** Library assumes panels with different scan rates (1/2, 1/4, 1/8, 1/16) but the driver has no specific support for P10 outdoor.
+// Wrapper expõe interface 32x16
+P10_32x16_QuarterScan *display = new P10_32x16_QuarterScan(dma_display);
 
-**Symptoms:**
-- Duplicated lines (2-4 simultaneous lines)
-- Unreadable display
-- Text appears as left/right mirrored garbage
-
-## Solution Implemented
-
-Created wrapper library `P10_32x16_QuarterScan` that:
-1. Inherits from `Adafruit_GFX` (CRITICAL for text to work)
-2. Implements custom coordinate remapping
-3. Overrides `drawPixel()` to intercept ALL drawing operations
-
-Repository: https://github.com/filipe3x/P10_32x16_QuarterScan
-
-This custom wrapper was built based on comments in:
-- https://github.com/hzeller/rpi-rgb-led-matrix/issues/242
-- https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/discussions/622
-
-## 🔴 CURRENT STATE - PROBLEM NOT RESOLVED
-
-### ✅ What Works PERFECTLY:
-- `drawPixel()` individual
-- `drawLine()` horizontal/vertical
-- `fillRect()`, `drawRect()`
-- `fillScreen()`, `clearScreen()`
-- All basic graphic operations
-
-### ❌ What Does NOT Work:
-- `print()` for text → continues to appear duplicated and mirrored
-- Despite correct `Adafruit_GFX` inheritance
-- `print()` IS calling `drawPixel()` (confirmed in tests)
-- But X remapping causes duplication when there are multiple sequential pixels
-
-## 🔍 Detailed Diagnosis
-
-### Tests Performed:
-- `drawPixel(5,5)` → appears 2 pixels (duplicated)
-- `print("1")` → appears 2 numbers '1' mirrored (same problem!)
-- Horizontal line → appears 1 perfect line ✅
-- `print("10:30")` → duplicated left/right garbage
-
-### Conclusion:
-- GFX inheritance works ✅ (`print()` calls `drawPixel()`)
-- Problem is in the `remapX()` algorithm
-- When drawing sequential pixels (like text), remapping spreads/duplicates
-
-### Observed Mapping Data:
-```
-X logical 0  → physical columns 1 AND 17 (duplicated +16)
-X logical 10 (wrapper) → columns 14 AND 30
-X logical 10 (base without wrapper) → columns 3 AND 19
-Pattern: Everything duplicated with 16-column offset
+// Usar normalmente
+display->print("Hello!"); // ✅ Funciona!
+display->drawPixel(0, 0, RED); // ✅ Sem duplicação!
 ```
 
-## 🎯 Task for Claude Code
+## Referências
 
-**OBJECTIVE:** Fix the `remapX()` function so that text works without duplication.
+- [Issue #680](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/issues/680) - Solução final
+- [Issue #677](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/issues/677) - Discussão inicial pxbase
+- [Discussion #622](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/discussions/622) - VirtualMatrixPanel approach
+- [rpi-rgb-led-matrix #242](https://github.com/hzeller/rpi-rgb-led-matrix/issues/242) - P10outdoorTransformer
 
-**CRITICAL RESTRICTIONS:**
-1. ⚠️ **DO NOT TOUCH** `remapY()` - it's perfect!
-2. ⚠️ Horizontal/vertical lines **ALREADY WORK** - don't break this!
-3. ✅ `Adafruit_GFX` inheritance is correct - keep it!
-4. ✅ `drawPixel()` override is correct - keep the structure!
+## Histórico do Problema
 
-**SPECIFIC PROBLEM:**
-- `remapX()` has `* 2` that duplicates coordinates
-- Attempt to remove `* 2` made lines stop working
-- Need algorithm that works for **BOTH**: individual pixels AND pixel sequences (text)
+### Tentativas Falhadas (para referência)
+- Configuração 32x16 com remapX/remapY → duplicação persistente
+- pxbase=1 → ordem errada das linhas (2-1-4-3)
+- pxbase=16 → mapeamento incorreto
+- Remover multiplicador *2 → linhas pararam de funcionar
 
-**DATA TO HELP:**
-```
-Observations from tests:
-- Horizontal line Y=8 with drawLine → 1 perfect line
-- Text "10:30" with print() → duplicated and mirrored
-- drawPixel(5,5) individual → 2 pixels (duplicated)
-- print("1") → 2 numbers '1' (same drawPixel behavior!)
-
-Duplication pattern:
-- Everything appears duplicated with 16-column offset
-- X=0 → columns 1 and 17
-- X=10 → columns 14 and 30 (or 3 and 19 depending on Y)
-```
-
-### 🔧 Previous Attempts (All Failed)
-- Remove `* 2` → lines stopped working
-- Simplify to `return x;` → everything went wrong
-- Try `return x % 32;` → still duplicated
-- Complex conditional remapping → made it worse
-
-## 📚 References
-
-- Base library: [ESP32-HUB75-MatrixPanel-I2S-DMA](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA)
-- Discussion about P10: [GitHub issue #622](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/discussions/622) (custom VirtualMatrixPanel classes)
-- [rpi-rgb-led-matrix issue #242](https://github.com/hzeller/rpi-rgb-led-matrix/issues/242)
-- Datasheet: P10 SMD3535 1/4 scan outdoor module
+### O que Finalmente Funcionou
+- Configuração **64x8** (dobro da largura, metade da altura)
+- Fórmula #680 com **pxbase=8** e **lógica invertida** vs #677
+- Resultado: 32x16 pixels únicos sem duplicação
