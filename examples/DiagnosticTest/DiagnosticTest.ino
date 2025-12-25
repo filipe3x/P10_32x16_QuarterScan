@@ -302,6 +302,28 @@ void resetDebugCount() {
   Serial.println("\n--- Novo teste ---");
 }
 
+// ============ DEBUG HELPERS - Fórmula #680 ============
+// Estas funções extraem as transformações X/Y da fórmula #680
+// para uso em debug output (mostrar mapeamento sem desenhar)
+
+// Transforma Y lógico (0-15) para Y do driver (0-7)
+int16_t mapY_680(int16_t y) {
+  return ((y >> 3) * 4) + (y & 0b00000011);
+}
+
+// Transforma X lógico (0-31) para X do driver (0-63)
+// Precisa de Y lógico para determinar o offset correto
+int16_t mapX_680(int16_t x, int16_t y) {
+  const uint8_t pxbase = 8;
+  if ((y & 4) == 0) {
+    // Linhas 0-3 e 8-11
+    return x + (x / pxbase) * pxbase;
+  } else {
+    // Linhas 4-7 e 12-15
+    return x + ((x / pxbase) + 1) * pxbase;
+  }
+}
+
 // ============ VARIÁVEIS GLOBAIS ============
 int currentMode = 0;
 int currentStep = 0;
@@ -346,18 +368,18 @@ void printCoords(const char* prefix, int16_t x, int16_t y) {
 }
 
 void printMapping(int16_t logX, int16_t logY) {
-  int16_t mappedY = remapY(logY);
-  int16_t mappedX = remapX(logX, mappedY);
-  int16_t finalY = (logY < 8) ? mappedY : mappedY + 8;
+  // Usa fórmula #680 para mostrar mapeamento
+  int16_t driverY = mapY_680(logY);
+  int16_t driverX = mapX_680(logX, logY);
 
   Serial.print("  Logico: (");
   Serial.print(logX);
   Serial.print(", ");
   Serial.print(logY);
-  Serial.print(") -> Fisico: (");
-  Serial.print(mappedX);
+  Serial.print(") -> Driver: (");
+  Serial.print(driverX);
   Serial.print(", ");
-  Serial.print(finalY);
+  Serial.print(driverY);
   Serial.println(")");
 }
 
@@ -481,10 +503,10 @@ void testHorizontalLinesWrapped() {
 
   Serial.print("\n[WRAPPER] Linha horizontal Y=");
   Serial.println(currentStep);
-  Serial.print("  Mapeamento Y: ");
+  Serial.print("  Mapeamento Y (#680): ");
   Serial.print(currentStep);
-  Serial.print(" -> ");
-  Serial.println(remapY(currentStep));
+  Serial.print(" -> driverY=");
+  Serial.println(mapY_680(currentStep));
   Serial.println("  -> OBSERVE: Onde aparece a linha verde?");
 
   waitForNext();
@@ -532,17 +554,17 @@ void testVerticalColumnsWrapped() {
   Serial.println(currentStep);
   Serial.println("  -> OBSERVE: Onde aparece a coluna vermelha?");
 
-  // Mostrar mapeamento detalhado
-  Serial.println("  Mapeamento X para cada Y:");
+  // Mostrar mapeamento detalhado (#680)
+  Serial.println("  Mapeamento X (#680) para cada Y:");
   for (int y = 0; y < 16; y++) {
-    int16_t my = remapY(y);
-    int16_t mx = remapX(currentStep, my);
+    int16_t driverY = mapY_680(y);
+    int16_t driverX = mapX_680(currentStep, y);
     Serial.print("    Y=");
     Serial.print(y);
-    Serial.print(" -> (");
-    Serial.print(mx);
+    Serial.print(" -> driver(");
+    Serial.print(driverX);
     Serial.print(", ");
-    Serial.print(y < 8 ? my : my + 8);
+    Serial.print(driverY);
     Serial.println(")");
   }
 
@@ -940,10 +962,10 @@ void testFixedY() {
   Serial.print(currentStep);
   Serial.println(" com todos os X (0-31)");
   Serial.println("  Cores: X[0-7]=Vermelho, X[8-15]=Amarelo, X[16-23]=Ciano, X[24-31]=Azul");
-  Serial.print("  remapY(");
+  Serial.print("  mapY_680(");
   Serial.print(currentStep);
   Serial.print(") = ");
-  Serial.println(remapY(currentStep));
+  Serial.println(mapY_680(currentStep));
   Serial.println("  -> OBSERVE: A linha esta continua? Cores na ordem certa?");
 
   waitForNext();
