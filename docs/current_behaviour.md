@@ -941,9 +941,125 @@ coords.y = (coords.y >> 3) * 4 + (coords.y & 0b00000011);
 
 ---
 
-## ⚡ Próximas Ações Prioritárias
+---
 
-1. **IMEDIATO**: Testar `mxconfig(64, 8, 1, _pins)` sem alterar remapping
-2. **SE FUNCIONAR**: Adaptar fórmulas para novo espaço de coordenadas
-3. **SE NÃO**: Testar classe VirtualMatrixPanel com override de getCoords()
-4. **BACKUP**: Mapeamento empírico completo via Mode 2 do DiagnosticTest
+## ✅ SOLUÇÃO ENCONTRADA - Issue #680
+
+### Resumo Executivo
+
+O problema de duplicação foi **RESOLVIDO** usando a solução da [Issue #680](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/issues/680):
+
+1. **Configuração 64x8** em vez de 32x16
+2. **Fórmula #680** com `pxbase=8` e lógica invertida
+
+### Configuração Correcta
+
+```cpp
+// ⚠️ CRÍTICO: Usar 64x8, NÃO 32x16!
+HUB75_I2S_CFG mxconfig(64, 8, 1, _pins);
+mxconfig.clkphase = false;
+mxconfig.driver = HUB75_I2S_CFG::SHIFTREG;
+```
+
+### Fórmula de Mapeamento #680
+
+```cpp
+void drawPixel(int16_t x, int16_t y, uint16_t color) {
+    if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
+
+    const uint8_t pxbase = 8;
+    int16_t driverX, driverY;
+
+    // Transformação Y: comprime 16 linhas em 8
+    driverY = ((y >> 3) * 4) + (y & 0b00000011);
+
+    // Transformação X com pxbase=8
+    if ((y & 4) == 0) {
+        // Linhas 0-3 e 8-11
+        driverX = x + (x / pxbase) * pxbase;
+    } else {
+        // Linhas 4-7 e 12-15
+        driverX = x + ((x / pxbase) + 1) * pxbase;
+    }
+
+    baseDisplay->drawPixel(driverX, driverY, color);
+}
+```
+
+### Tabela de Mapeamento Final
+
+**Mapeamento X (32 lógico → 64 driver):**
+
+| X lógico | y&4==0 (linhas 0-3, 8-11) | y&4!=0 (linhas 4-7, 12-15) |
+|----------|---------------------------|----------------------------|
+| 0        | 0                         | 8                          |
+| 1        | 1                         | 9                          |
+| ...      | ...                       | ...                        |
+| 7        | 7                         | 15                         |
+| 8        | 16                        | 24                         |
+| 9        | 17                        | 25                         |
+| ...      | ...                       | ...                        |
+| 15       | 23                        | 31                         |
+| 16       | 32                        | 40                         |
+| ...      | ...                       | ...                        |
+| 31       | 55                        | 63                         |
+
+**Mapeamento Y (16 lógico → 8 driver):**
+
+| Y lógico | driverY | Fórmula aplicada |
+|----------|---------|------------------|
+| 0        | 0       | (0>>3)*4 + (0&3) = 0 |
+| 1        | 1       | (1>>3)*4 + (1&3) = 1 |
+| 2        | 2       | (2>>3)*4 + (2&3) = 2 |
+| 3        | 3       | (3>>3)*4 + (3&3) = 3 |
+| 4        | 0       | (4>>3)*4 + (4&3) = 0 |
+| 5        | 1       | (5>>3)*4 + (5&3) = 1 |
+| 6        | 2       | (6>>3)*4 + (6&3) = 2 |
+| 7        | 3       | (7>>3)*4 + (7&3) = 3 |
+| 8        | 4       | (8>>3)*4 + (8&3) = 4 |
+| 9        | 5       | (9>>3)*4 + (9&3) = 5 |
+| 10       | 6       | (10>>3)*4 + (10&3) = 6 |
+| 11       | 7       | (11>>3)*4 + (11&3) = 7 |
+| 12       | 4       | (12>>3)*4 + (12&3) = 4 |
+| 13       | 5       | (13>>3)*4 + (13&3) = 5 |
+| 14       | 6       | (14>>3)*4 + (14&3) = 6 |
+| 15       | 7       | (15>>3)*4 + (15&3) = 7 |
+
+### Por que Funciona
+
+1. **64 endereços de coluna**: Com config 64x8, o driver tem 64 endereços únicos
+2. **Sem duplicação hardware**: Cada endereço corresponde a um único pixel físico
+3. **pxbase=8**: Alinha com a arquitectura de blocos de 8 colunas do hardware
+4. **Lógica invertida**: Corrige a ordem das linhas (1-2-3-4 em vez de 2-1-4-3)
+
+### Diferença #677 vs #680
+
+| Aspeto | #677 (falhou) | #680 (funciona) |
+|--------|---------------|-----------------|
+| pxbase | 1 | **8** |
+| y&4==0 | x + ((x/1)+1)*1 = 2x+1 | x + (x/8)*8 |
+| y&4!=0 | x + (x/1)*1 = 2x | x + ((x/8)+1)*8 |
+| Condição | Uma lógica | **INVERTIDA** |
+| Resultado | Linhas 2-1-4-3 | Linhas 1-2-3-4 ✓ |
+
+### Status Final
+
+- ✅ Pixels individuais: SEM duplicação
+- ✅ Linhas horizontais: CORRECTAS
+- ✅ Linhas verticais: CORRECTAS
+- ✅ Texto (print): FUNCIONA
+- ✅ fillRect/fillScreen: FUNCIONA
+- ✅ Todas as funções Adafruit_GFX: FUNCIONAM
+
+---
+
+## Referências
+
+- [Issue #680](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/issues/680) - Solução final implementada
+- [Issue #677](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/issues/677) - Discussão inicial sobre pxbase
+- [Discussion #622](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA/discussions/622) - VirtualMatrixPanel approach
+
+---
+
+**Documento actualizado**: Dezembro 2025
+**Status**: ✅ PROBLEMA RESOLVIDO
