@@ -284,32 +284,39 @@ bool reinitDisplay32x16() {
 // Fórmula #677 para config 64x8
 // Entrada: coordenadas lógicas 32x16
 // Saída: desenha no display 64x8 com mapeamento correto
+//
+// ANÁLISE DOS DADOS DO UTILIZADOR:
+// Driver (16, 0) → Physical (9, 1)   - offset X de +8 em relação ao esperado
+// Driver (24, 0) → Physical (9, 5)   - salto de linha a cada 8 pixels
+//
+// HIPÓTESE: A fórmula original está invertida!
+// - Quando y&4 == 0: NÃO adicionar offset (para primeiros blocos)
+// - Quando y&4 != 0: Adicionar offset (para blocos alternados)
+//
 void drawPixelFormula677(int16_t x, int16_t y, uint16_t color) {
   if (x < 0 || x >= 32 || y < 0 || y >= 16) return;
 
-  // Fórmula da issue #677
+  // Fórmula CORRIGIDA (invertida em relação à #677 original)
   uint8_t pxbase = 16;
   int16_t driverX = x;
   int16_t driverY = y;
 
   // Transformação Y: comprime 16 linhas em 8, alternando blocos de 4
-  // y = (y >> 3) * 4 + (y & 0b11)
-  // Isto mapeia: 0-3→0-3, 4-7→0-3, 8-11→4-7, 12-15→4-7
   driverY = ((y >> 3) * 4) + (y & 0b00000011);
 
-  // Transformação X baseada no bloco Y
+  // Transformação X - INVERTIDA em relação à #677 original!
   if ((y & 4) == 0) {
-    // Linhas 0-3 e 8-11: adicionar offset para segunda metade
-    driverX = x + (((x / pxbase) + 1) * pxbase);
-  } else {
-    // Linhas 4-7 e 12-15: offset normal
+    // Linhas 0-3 e 8-11: SEM offset extra (era COM offset na #677)
     driverX = x + ((x / pxbase) * pxbase);
+  } else {
+    // Linhas 4-7 e 12-15: COM offset (era SEM na #677)
+    driverX = x + (((x / pxbase) + 1) * pxbase);
   }
 
   // Debug output (apenas para primeiros pixels)
   static int debugCount = 0;
   if (debugCount < 10) {
-    Serial.print("  #677: (");
+    Serial.print("  CORRIGIDA: (");
     Serial.print(x);
     Serial.print(",");
     Serial.print(y);
@@ -1139,18 +1146,21 @@ void testPixelByPixelNewFormula() {
   // Usar a fórmula #677 para config 64x8
   drawPixelFormula677(x, y, GREEN);
 
-  // Calcular valores para debug
+  // Calcular valores para debug (fórmula CORRIGIDA - invertida)
   uint8_t pxbase = 16;
   int16_t driverX = x;
   int16_t driverY = ((y >> 3) * 4) + (y & 0b00000011);
 
+  // Fórmula INVERTIDA em relação à #677 original!
   if ((y & 4) == 0) {
-    driverX = x + (((x / pxbase) + 1) * pxbase);
-  } else {
+    // Linhas 0-3 e 8-11: SEM offset extra
     driverX = x + ((x / pxbase) * pxbase);
+  } else {
+    // Linhas 4-7 e 12-15: COM offset
+    driverX = x + (((x / pxbase) + 1) * pxbase);
   }
 
-  Serial.print("\n[FORMULA #677 - 64x8] Pixel ");
+  Serial.print("\n[FORMULA CORRIGIDA - 64x8] Pixel ");
   Serial.print(currentStep + 1);
   Serial.print("/");
   Serial.println(totalPixels);
@@ -1170,7 +1180,7 @@ void testPixelByPixelNewFormula() {
   Serial.print(", (y&3)=");
   Serial.println(y & 3);
   Serial.println("  -> OBSERVE: Pixel na posicao CORRETA? SEM duplicacao?");
-  Serial.println("     Se SIM: A formula #677 com 64x8 FUNCIONA!");
+  Serial.println("     Esperado para (0,0): Physical (1,1) ou proximo");
 
   waitForNext();
 }
