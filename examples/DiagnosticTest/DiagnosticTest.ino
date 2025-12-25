@@ -1098,10 +1098,9 @@ void testFillScreen() {
 // Teste 16: Pixel a pixel com FORMULA #677 (config 64x8)
 // NOTA: Este teste reinicializa o display como 64x8!
 void testPixelByPixelNewFormula() {
-  static bool initialized64x8 = false;
-
   // Na primeira iteração, reinicializar como 64x8
-  if (currentStep == 0 && !initialized64x8) {
+  // Usa is64x8Mode (global) em vez de static local para detectar se precisa reinit
+  if (currentStep == 0 && !is64x8Mode) {
     Serial.println("\n╔═══════════════════════════════════════════════════════╗");
     Serial.println("║  TESTE 16: FORMULA #677 COM CONFIGURACAO 64x8         ║");
     Serial.println("║  Baseado em: github.com/.../issues/677                ║");
@@ -1116,7 +1115,6 @@ void testPixelByPixelNewFormula() {
       currentMode = 0;
       return;
     }
-    initialized64x8 = true;
     delay(500);
   }
 
@@ -1125,9 +1123,8 @@ void testPixelByPixelNewFormula() {
     Serial.println("\n=== TESTE COMPLETO ===");
     Serial.println(">>> Restaurando display para 32x16...");
 
-    // Restaurar configuração original
+    // Restaurar configuração original (is64x8Mode é resetado em reinitDisplay32x16)
     reinitDisplay32x16();
-    initialized64x8 = false;
 
     currentMode = 0;
     currentStep = 0;
